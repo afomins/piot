@@ -4,49 +4,55 @@
 import argparse
 import subprocess
 import logging
-import configparser
 import json
 import os
 import urllib.parse
 import time
 from collections import OrderedDict
-from time import gmtime, strftime
 
 #---------------------------------------------------------------------------------------------------
-NOK_OK=("nok", "ok")
+NOK_OK = ("nok", "ok")
 APP_NAME = "piot"
-CONF_FILE=os.environ['HOME'] + "/." + APP_NAME + ".conf"
-LOG_FILE="/tmp/" + APP_NAME + ".log"
-DB_CURRENT="dev-current.json"
+CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
+LOG_FILE = "/tmp/" + APP_NAME + ".log"
+DB_CURRENT = "dev-current.json"
 
 #---------------------------------------------------------------------------------------------------
 log = None
-cfg = None
 
 #---------------------------------------------------------------------------------------------------
-class Config:
-    def __init__(self):
-        self.cfg = configparser.ConfigParser()
-        self.cfg.read(CONF_FILE)
+class Utils:
+    def get_timestamp():
+        return int(time.time())
 
-    def read(self, section, key):
-        if section not in self.cfg:
-            return None
-        sec = self.cfg[section]
+    def is_dir_present(path):
+        return os.path.isdir(path)
 
-        if key not in sec:
-            return None
-        return sec[key]
+    def is_file_present(path):
+        return os.path.isfile(path) 
 
-    def write(self, section, key, value):
-        if section not in self.cfg:
-            self.cfg[section] = {}
-        self.cfg[section][key] = value
-        self.flush()
+    def is_file_empty(path):
+        return os.stat(path).st_size == 0
 
-    def flush(self):
-        with open(CONF_FILE, 'w+') as configfile:
-            self.cfg.write(configfile)
+    def split_lines(lines, prefix, cb):
+        first = True
+        for l in lines.splitlines():
+            cb(prefix + l)
+            if first:
+                prefix = " " * len(prefix)
+                first = False
+
+    def log_lines(log_level, prefix, line, bid):
+        def cb(line):
+            log.log(log_level, line, bid, False)
+        Utils.split_lines(line, prefix, cb)
+
+    def get_db_name(device_name):
+        return "db-" + device_name
+
+    def get_file_name(device_name):
+        timestamp=str(Utils.get_timestamp())
+        return "dev-" + device_name + "-" + timestamp + ".json"
 
 #---------------------------------------------------------------------------------------------------
 class Logger:
@@ -58,80 +64,237 @@ class Logger:
         self.is_debug = is_debug
         self.flog = open(LOG_FILE, "w+")
 
-    def log(self, prefix, bid, msg, next_bid):
-        string = prefix + " "
+    def log(self, prefix, line, bid, next_bid):
+        prefix_ext = prefix + " "
 
         if bid == None and next_bid:
             self.bid += 1
             bid = self.bid
 
         if bid == None:
-            string += self.BATCH_ID_FILLER + " "
+            prefix_ext += self.BATCH_ID_FILLER + " "
         else:
-            string += str(bid).zfill(self.BATCH_ID_SIZE) + " "
+            prefix_ext += str(bid).zfill(self.BATCH_ID_SIZE) + " "
 
         # Write debugs to stdout only when explicitly allowed
-        out = string + msg
+        out = prefix_ext + line
         if prefix != "DBG" or self.is_debug:
             print(out)
 
         # Write all messages to log
         self.flog.write(out + "\n")
-        self.flog.flush()
+#        self.flog.flush()
         return bid
 
-    def dbg(self, str, bid = None, next = False):
-        return self.log("DBG", bid, str, next_bid = next)
+    def dbg(self, line, bid = None, next = False):
+        return self.log("DBG", line, bid, next_bid=next)
 
-    def inf(self, str, bid = None, next = False):
-        return self.log("INF", bid, str, next_bid = next)
+    def inf(self, line, bid = None, next = False):
+        return self.log("INF", line, bid, next_bid=next)
 
-    def err(self, str, bid = None, next = False):
-        return self.log("ERR", bid, str, next_bid = next)
+    def err(self, line, bid = None, next = False):
+        return self.log("ERR", line, bid, next_bid=next)
 
 #---------------------------------------------------------------------------------------------------
-class ShellCmd:
+class Cmd:
     cmd = ""
+    params = {}
+    bid = None
     out = ""
     err = ""
-    rc = -1
+    rc = 0
 
-    def __init__(self, cmd):
-        self.run_cmd(cmd)
-
-    def run_cmd(self, cmd):
+    def __init__(self, cmd, params):
         self.cmd = cmd
-        self.bid = log.dbg("Running shell command :: cmd=" + self.cmd, next=True)
+        self.params = params
 
-        ret = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.out = ret.stdout.decode("utf-8").strip()
-        self.err = ret.stderr.decode("utf-8").strip() 
-        self.rc = ret.returncode
-        self.log(self.bid)
+        # Allocate Batch-ID 
+        self.bid = self.alloc_bid()
 
-    def log_multi_line(self, log_level, prefix_first, line, bid):
-        first = True
-        prefix_next = " " * len(prefix_first)
-        for l in line.splitlines():
-            if first:
-                log.log(log_level, bid, prefix_first + l, False)
-                first = False
-            else:
-                log.log(log_level, bid, prefix_next + l, False)
+        # Run command
+        if self.is_ok():
+            self.run()
 
-    def log(self, bid):
-        log.dbg("  >> rc  = " + str(self.rc), bid=bid)
-        if len(self.out) > 0:
-            self.log_multi_line("DBG", "  >> out = ", self.out, bid)
-        if len(self.err) > 0:
-            self.log_multi_line("DBG", "  >> err = ", self.err, bid)
+        # Log status
+        self.log_status()
+
+    def alloc_bid(self):
+        return None
+
+    def run(self):
+        return True
 
     def is_ok(self):
         return self.rc == 0
 
-    def clean_status(self):
+    def set_err(self, msg, rc = -1):
+        self.err = msg
+        self.rc = rc
+
+    def clear_status(self):
         self.out = ""
         self.err = ""
+
+    def log_status(self):
+        log.log("DBG", "  >> rc  = " + str(self.rc), self.bid, False)
+        if len(self.out) > 0:
+            Utils.log_lines("DBG", "  >> out = ", self.out, self.bid)
+        if len(self.err) > 0:
+            Utils.log_lines("DBG", "  >> err = ", self.err, self.bid)
+
+#---------------------------------------------------------------------------------------------------
+class ShellCmd(Cmd):
+    def __init__(self, cmd):
+        super(ShellCmd, self).__init__(cmd, {})
+
+    def alloc_bid(self):
+        return log.dbg("Running shell command :: cmd=" + self.cmd, next=True)
+
+    def run(self):
+        ret = subprocess.run(self.cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.out = ret.stdout.decode("utf-8").strip()
+        self.err = ret.stderr.decode("utf-8").strip() 
+        self.rc = ret.returncode
+
+#---------------------------------------------------------------------------------------------------
+class ActionCmd(Cmd):
+    def __init__(self, cmd, params):
+        super(ActionCmd, self).__init__(cmd, params)
+
+    def alloc_bid(self):
+        # Test mandatory parameters
+        is_ok = True
+        params_str = ""
+        for k, v in self.params.items():
+            params_str += k + "=" + str(v) + " "
+            if not v:
+                is_ok = False
+
+        # Fail if mandatory parameters are missing
+        if not is_ok:
+            self.set_err("Error, mandatory parameters are missing")
+
+        # Allocate Batch-ID
+        log_line = "Running action command :: cmd=" + self.cmd + " " + params_str
+        log.inf(log_line)
+
+        return log.dbg("", next=True)
+
+#---------------------------------------------------------------------------------------------------
+class ActionDbCreate(ActionCmd):
+    def __init__(self, args):
+        self.param_name = args.name
+
+        super(ActionDbCreate, self).__init__(args.action, 
+          OrderedDict({"name":self.param_name}))
+
+    def run(self):
+        # Get DB name
+        db_name = Utils.get_db_name(self.param_name)
+
+        # Check if DB already exists
+        if Utils.is_dir_present(db_name):
+            self.set_err("Error, db already exists")
+            return
+
+        # Get file name 
+        db_file = Utils.get_file_name(self.param_name)
+
+        # Create new DB directory
+        cmd = "mkdir " + db_name                                + " && " + \
+              "cd " + db_name                                   + " && " + \
+              "git init "                                       + " && " + \
+              "git checkout -b " + db_name                      + " && " + \
+              "touch " + db_file                                + " && " + \
+              "git add " + db_file                              + " && " + \
+              "ln -s " + db_file + " " + DB_CURRENT             + " && " + \
+              "git add " + DB_CURRENT                           + " && " + \
+              "git commit -m 'Initial commit'"
+        if not ShellCmd(cmd).is_ok():
+            err += ", failed to create DB"
+            break
+
+        # Success !!!!
+        err = None 
+        break
+
+#---------------------------------------------------------------------------------------------------
+class ActionDbWrite(ActionCmd):
+    def __init__(self, args):
+        self.param_name = args.name
+        self.param_data = args.data
+
+        super(ActionDbWrite, self).__init__(args.action, 
+          OrderedDict({"name":self.param_name, "data":self.param_data}))
+
+    def run(self):
+        # Get DB name
+        db_name = Utils.get_db_name(self.param_name)
+
+        # Get path of current DB file
+        db_file = "./" + db_name + "/" + DB_CURRENT
+
+        # Check if DB is present
+        if not Utils.is_dir_present(db_name) or not Utils.is_file_present(db_file):
+            self.set_err("Error, DB is missing")
+            return
+
+        # Prefix to separate data entries
+        prefix = ", "
+        if Utils.is_file_empty(db_file):
+            prefix = "  "
+
+        # Build header
+        timestamp = str(Utils.get_timestamp())
+        header = "{\"timestamp\":" + timestamp + "}"
+
+        # Write current file
+        cmd = "echo '" + prefix + "{ "                                      + \
+                    "\"header\":" + header + ","                            + \
+                    "\"data\":" + self.param_data                           + \
+               "}' >> " + db_file
+        if not ShellCmd(cmd).is_ok():
+            self.set_err("Error, failed to write data")
+            return
+
+#---------------------------------------------------------------------------------------------------
+class ActionDbRead(ActionCmd):
+    def __init__(self, args):
+        self.param_name = args.name
+        self.param_dest = args.dest
+        self.param_filter = args.filter
+
+        super(ActionDbRead, self).__init__(args.action, 
+          OrderedDict({"name":self.param_name, "dest":self.param_dest, "filter":self.param_filter}))
+
+    def run(self):
+        # Get DB name
+        db_name = Utils.get_db_name(self.param_name)
+
+        # Get path of current DB file
+        cur_file = "./" + db_name + "/" + DB_CURRENT
+
+        # Check if DB is present
+        if not Utils.is_dir_present(db_name) or not Utils.is_file_present(cur_file):
+            self.set_err("Error, DB is missing")
+            return
+
+        # Read DB
+        cmd = "(echo ["                                          + " && " + \
+               "cat " + cur_file                                 + " && " + \
+               "echo ]) > " + self.param_dest
+        if not ShellCmd(cmd).is_ok():
+            self.set_err("Error, failed to read data")
+            return 
+
+        # Apply JQ filter
+        cmd = ShellCmd("cat " + self.param_dest + " | jq " + self.param_filter)
+        if not cmd.is_ok():
+            self.set_err("Error, failed to apply filter")
+            return
+
+        # Log JSON to stdout
+        Utils.log_lines("INF", "  >> out = ", cmd.out, None)
 
 #---------------------------------------------------------------------------------------------------
 class App:
@@ -143,10 +306,6 @@ class App:
         # Set log level
         global log
         log = Logger(self.args.debug)
-
-        # Read config
-        global cfg
-        cfg = Config()
 
     #-----------------------------------------------------------------------------------------------
     # ACTION
@@ -164,15 +323,6 @@ class App:
         return is_ok
 
     #-----------------------------------------------------------------------------------------------
-    def get_db_name(self, device_name):
-        return "db-" + device_name
-
-    #-----------------------------------------------------------------------------------------------
-    def get_file_name(self, device_name):
-        timestamp=str(int(time.time()))
-        return "dev-" + device_name + "-" + timestamp + ".json"
-
-    #-----------------------------------------------------------------------------------------------
     def action_db_create(self, a):
         if not self.test_action_params("Creating db", 
           OrderedDict({"name":a.name})):
@@ -185,7 +335,7 @@ class App:
             db_name = self.get_db_name(a.name)
 
             # Check if DB already exists
-            if ShellCmd("[ -d " + db_name + " ]").is_ok():
+            if Utils.is_dir_present(db_name):
                 err += ", db already exists"
                 break
 
@@ -212,105 +362,7 @@ class App:
 
         if err:
             log.err(err);
-            return False
-        else:
-            return True
-
-    #-----------------------------------------------------------------------------------------------
-    def action_db_write(self, a):
-        if not self.test_action_params("Writing db", 
-          OrderedDict({"name":a.name, "data":a.data})):
-            return False
-
-        # Run
-        err = "Error"
-        while True:
-            # Get names
-            db_name = self.get_db_name(a.name)
-            cur_file = "./" + db_name + "/" + DB_CURRENT
-
-            # Check if DB is present
-            cmd = "[ -d " + db_name + " ]"                          + " && " + \
-                  "[ -f " + cur_file + " ]"
-            if not ShellCmd(cmd).is_ok():
-                err += ", DB is missing"
-                break
-
-            # Prefix to separate data entries
-            prefix = ", "
-            if os.stat(cur_file).st_size == 0:
-                prefix = "  "
-
-            # Header
-            timestamp = str(int(time.time()))
-            header = "{\"timestamp\":\"" + timestamp + "\"" + "}"
-
-            # Write current file
-            cmd = "echo '" + prefix + "{ "                                  + \
-                        "\"header\":" + header + ","                        + \
-                        "\"data\":" + a.data                                + \
-                   "}' >> " + cur_file
-
-            if not ShellCmd(cmd).is_ok():
-                err += ", failed to write data"
-                break
-
-            # Success !!!!
-            err = None
-            break
-
-        if err:
-            log.err(err);
-            return False
-        else:
-            return True
-
-    #-----------------------------------------------------------------------------------------------
-    def action_db_read(self, a):
-        if not self.test_action_params("Writing db", 
-          OrderedDict({"name":a.name, "dest":a.dest, "filter":a.filter})):
-            return False
-
-        # Run
-        err = "Error"
-        while True:
-            # Names
-            db_name = self.get_db_name(a.name)
-
-            # Current DB file
-            cur_file = "./" + db_name + "/" + DB_CURRENT
-
-            # Check if DB is present
-            cmd = "[ -d " + db_name + " ]"                          + " && " + \
-                  "[ -f " + cur_file + " ]"
-            if not ShellCmd(cmd).is_ok():
-                err += ", DB is missing"
-                break
-
-            # Write current file
-            cmd = "(echo ["                                          + " && " + \
-                   "cat " + cur_file                                 + " && " + \
-                   "echo ]) > " + a.dest
-            if not ShellCmd(cmd).is_ok():
-                err += ", failed to read data"
-                break
-
-            # Apply JQ filter
-            cmd = ShellCmd("cat " + a.dest + " | jq " + a.filter)
-            if not cmd.is_ok():
-                err += ", failed to apply filter"
-                break
-            cmd.log_multi_line("INF", "  >> out = ", cmd.out, None)
-
-            # Success !!!!
-            err = None
-            break
-
-        if err:
-            log.err(err);
-            return False
-        else:
-            return True
+        return not err;
 
     #-----------------------------------------------------------------------------------------------
     def run(self):
@@ -329,10 +381,12 @@ class App:
             self.action_db_create(self.args)
 
         elif self.args.action == "db-write":
-            self.action_db_write(self.args)
+#            self.action_db_write(self.args)
+            ActionDbWrite(self.args)
 
         elif self.args.action == "db-read":
-            self.action_db_read(self.args)
+#            self.action_db_read(self.args)
+            ActionDbRead(self.args)
 
 #---------------------------------------------------------------------------------------------------
 """
@@ -348,8 +402,8 @@ if __name__ == "__main__":
     parser.add_argument('--filter', action='store', default=".", help='JQ filter')
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--dest', action='store', default="/tmp/" + str(os.getpid()), help='Destination where to read to')
-    parser.add_argument('--select-start', action='store', help='Start of selection frame')
-    parser.add_argument('--select-end', action='store', help='End of selection frame')
+    parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
+    parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
     parser.add_argument('--debug', action='store_true', help='Enable debugs')
 
     app = App(parser.parse_args())
