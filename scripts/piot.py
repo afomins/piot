@@ -11,14 +11,49 @@ import time
 from collections import OrderedDict
 
 #---------------------------------------------------------------------------------------------------
-NOK_OK = ("nok", "ok")
 APP_NAME = "piot"
 CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
+TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
 
 #---------------------------------------------------------------------------------------------------
 log = None
+status = None
+
+#---------------------------------------------------------------------------------------------------
+class Status(OrderedDict):
+    def __init__(self):
+        super(Status, self).__init__({})
+
+    def set_action(self, action):
+        self["action"] = action
+
+    def set_param(self, name, value):
+        if "params" not in self:
+            self["params"] = OrderedDict({})
+        self["params"][name] = value
+
+    def set_success(self, success):
+        self["success"] = success
+
+    def set_out(self, out):
+        if out:
+            try:
+                out = json.loads(out)
+            except:
+                out = None
+
+        self["out"] = {} if not out else out
+
+    def set_message(self, message):
+        self["message"] = message
+
+    def to_string(self):
+        try:
+            return str(json.dumps(self))
+        except:
+            return "{}"
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
@@ -34,6 +69,9 @@ class Utils:
     def is_file_empty(path):
         return os.stat(path).st_size == 0
 
+    def del_file(path):
+        return os.remove(path)
+
     def split_lines(lines, prefix, cb):
         first = True
         for l in lines.splitlines():
@@ -47,29 +85,32 @@ class Utils:
             log.log(log_level, line, bid, False)
         Utils.split_lines(line, prefix, cb)
 
-    def get_db_name(device_name):
-        return "db-" + device_name
-
-    def get_file_name(device_name):
-        timestamp=str(Utils.get_timestamp())
-        return "dev-" + device_name + "-" + timestamp + ".json"
+    def is_valid_json_string(str):
+        try:
+            json.loads(str)
+            return True
+        except:
+            pass
+        return False
 
 #---------------------------------------------------------------------------------------------------
 class Logger:
     BATCH_ID_SIZE = 6
     BATCH_ID_FILLER = " " * BATCH_ID_SIZE
 
-    def __init__(self, is_debug):
+    def __init__(self):
         self.bid = 0
-        self.is_debug = is_debug
         self.flog = open(LOG_FILE, "w+")
+
+    def next_bid(self):
+        self.bid += 1
+        return self.bid
 
     def log(self, prefix, line, bid, next_bid):
         prefix_ext = prefix + " "
 
         if bid == None and next_bid:
-            self.bid += 1
-            bid = self.bid
+            bid = self.next_bid()
 
         if bid == None:
             prefix_ext += self.BATCH_ID_FILLER + " "
@@ -78,7 +119,7 @@ class Logger:
 
         # Write debugs to stdout only when explicitly allowed
         out = prefix_ext + line
-        if prefix != "DBG" or self.is_debug:
+        if prefix != "DBG":
             print(out)
 
         # Write all messages to log
@@ -108,20 +149,30 @@ class Cmd:
         self.cmd = cmd
         self.params = params
 
-        # Allocate Batch-ID 
-        self.bid = self.alloc_bid()
+        # Prepare command 
+        self.bid = self.prepare()
 
         # Run command
         if self.is_ok():
             self.run()
 
-        # Log status
-        self.log_status()
+        # Finalize command
+        self.finalize()
 
-    def alloc_bid(self):
+        # Write log
+        log.log("DBG", "  >> rc  = " + str(self.rc), self.bid, self.bid)
+        if len(self.out) > 0:
+            Utils.log_lines("DBG", "  >> out = ", self.out, self.bid)
+        if len(self.err) > 0:
+            Utils.log_lines("DBG", "  >> err = ", self.err, self.bid)
+
+    def prepare(self):
         return None
 
     def run(self):
+        return True
+
+    def finalize(self):
         return True
 
     def is_ok(self):
@@ -131,23 +182,12 @@ class Cmd:
         self.err = msg
         self.rc = rc
 
-    def clear_status(self):
-        self.out = ""
-        self.err = ""
-
-    def log_status(self):
-        log.log("DBG", "  >> rc  = " + str(self.rc), self.bid, False)
-        if len(self.out) > 0:
-            Utils.log_lines("DBG", "  >> out = ", self.out, self.bid)
-        if len(self.err) > 0:
-            Utils.log_lines("DBG", "  >> err = ", self.err, self.bid)
-
 #---------------------------------------------------------------------------------------------------
 class ShellCmd(Cmd):
     def __init__(self, cmd):
         super(ShellCmd, self).__init__(cmd, {})
 
-    def alloc_bid(self):
+    def prepare(self):
         return log.dbg("Running shell command :: cmd=" + self.cmd, next=True)
 
     def run(self):
@@ -159,14 +199,39 @@ class ShellCmd(Cmd):
 #---------------------------------------------------------------------------------------------------
 class ActionCmd(Cmd):
     def __init__(self, cmd, params):
+        status.set_action(cmd)
         super(ActionCmd, self).__init__(cmd, params)
 
-    def alloc_bid(self):
+    def get_db_name(self, device_name):
+        return "db-" + device_name
+
+    def get_file_name(self, device_name):
+        timestamp=str(Utils.get_timestamp())
+        return "dev-" + device_name + "-" + timestamp + ".json"
+
+    def get_db_files(self, name):
+        # Get DB name
+        db_name = self.get_db_name(name)
+        if not Utils.is_dir_present(db_name):
+            self.set_err("Error, DB dir is missing :: name=" + name)
+            return None, None
+
+        # Get path of current DB file
+        db_file = "./" + db_name + "/" + DB_CURRENT
+        if not Utils.is_file_present(db_file):
+            self.set_err("Error, DB file is missing :: file=" + name)
+            return None, None
+
+        # Return dit + file tuple
+        return db_name, db_file
+
+    def prepare(self):
         # Test mandatory parameters
         is_ok = True
-        params_str = ""
         for k, v in self.params.items():
-            params_str += k + "=" + str(v) + " "
+            v_str = str(v)
+            status.set_param(k, v_str)
+
             if not v:
                 is_ok = False
 
@@ -175,10 +240,15 @@ class ActionCmd(Cmd):
             self.set_err("Error, mandatory parameters are missing")
 
         # Allocate Batch-ID
-        log_line = "Running action command :: cmd=" + self.cmd + " " + params_str
-        log.inf(log_line)
+        return log.log("DBG", "Running action :: " + status.to_string(), self.bid, True)
 
-        return log.dbg("", next=True)
+    def finalize(self):
+        status.set_success(self.is_ok())
+        status.set_message("" if not self.err else self.err)
+        status.set_out(self.out)
+
+        # Dump status JSON to stdout
+        print(status.to_string())
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(ActionCmd):
@@ -190,17 +260,16 @@ class ActionDbCreate(ActionCmd):
 
     def run(self):
         # Get DB name
-        db_name = Utils.get_db_name(self.param_name)
+        db_name = self.get_db_name(self.param_name)
 
         # Check if DB already exists
         if Utils.is_dir_present(db_name):
-            self.set_err("Error, db already exists")
-            return
+            return self.set_err("Error, db already exists")
 
         # Get file name 
-        db_file = Utils.get_file_name(self.param_name)
+        db_file = self.get_file_name(self.param_name)
 
-        # Create new DB directory
+        # Create new DB
         cmd = "mkdir " + db_name                                + " && " + \
               "cd " + db_name                                   + " && " + \
               "git init "                                       + " && " + \
@@ -211,12 +280,7 @@ class ActionDbCreate(ActionCmd):
               "git add " + DB_CURRENT                           + " && " + \
               "git commit -m 'Initial commit'"
         if not ShellCmd(cmd).is_ok():
-            err += ", failed to create DB"
-            break
-
-        # Success !!!!
-        err = None 
-        break
+            return self.set_err("Error, failed to create DB")
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbWrite(ActionCmd):
@@ -228,15 +292,13 @@ class ActionDbWrite(ActionCmd):
           OrderedDict({"name":self.param_name, "data":self.param_data}))
 
     def run(self):
-        # Get DB name
-        db_name = Utils.get_db_name(self.param_name)
+        # Validate data
+        if not Utils.is_valid_json_string(self.param_data):
+            return self.set_err("Error, invalid json in data")
 
-        # Get path of current DB file
-        db_file = "./" + db_name + "/" + DB_CURRENT
-
-        # Check if DB is present
-        if not Utils.is_dir_present(db_name) or not Utils.is_file_present(db_file):
-            self.set_err("Error, DB is missing")
+        # Get DB files
+        db_name, db_file = self.get_db_files(self.param_name)
+        if not db_name: 
             return
 
         # Prefix to separate data entries
@@ -254,47 +316,38 @@ class ActionDbWrite(ActionCmd):
                     "\"data\":" + self.param_data                           + \
                "}' >> " + db_file
         if not ShellCmd(cmd).is_ok():
-            self.set_err("Error, failed to write data")
-            return
+            return self.set_err("Error, failed to write data")
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbRead(ActionCmd):
     def __init__(self, args):
         self.param_name = args.name
-        self.param_dest = args.dest
         self.param_filter = args.filter
 
         super(ActionDbRead, self).__init__(args.action, 
-          OrderedDict({"name":self.param_name, "dest":self.param_dest, "filter":self.param_filter}))
+          OrderedDict({"name":self.param_name, "filter":self.param_filter}))
 
     def run(self):
-        # Get DB name
-        db_name = Utils.get_db_name(self.param_name)
-
-        # Get path of current DB file
-        cur_file = "./" + db_name + "/" + DB_CURRENT
-
-        # Check if DB is present
-        if not Utils.is_dir_present(db_name) or not Utils.is_file_present(cur_file):
-            self.set_err("Error, DB is missing")
+        # Get DB files
+        db_name, db_file = self.get_db_files(self.param_name)
+        if not db_name: 
             return
 
         # Read DB
         cmd = "(echo ["                                          + " && " + \
-               "cat " + cur_file                                 + " && " + \
-               "echo ]) > " + self.param_dest
+               "cat " + db_file                                  + " && " + \
+               "echo ]) > " + TMP_FILE
         if not ShellCmd(cmd).is_ok():
-            self.set_err("Error, failed to read data")
-            return 
+            return self.set_err("Error, failed to read data")
 
         # Apply JQ filter
-        cmd = ShellCmd("cat " + self.param_dest + " | jq " + self.param_filter)
+        cmd = ShellCmd("jq --compact-output " + self.param_filter + " " + TMP_FILE)
+        Utils.del_file(TMP_FILE);
         if not cmd.is_ok():
-            self.set_err("Error, failed to apply filter")
-            return
+            return self.set_err("Error, failed to apply filter")
 
-        # Log JSON to stdout
-        Utils.log_lines("INF", "  >> out = ", cmd.out, None)
+        # Save output
+        self.out = cmd.out
 
 #---------------------------------------------------------------------------------------------------
 class App:
@@ -303,89 +356,25 @@ class App:
     def __init__(self, args):
         self.args = args
 
-        # Set log level
-        global log
-        log = Logger(self.args.debug)
-
-    #-----------------------------------------------------------------------------------------------
-    # ACTION
-    #-----------------------------------------------------------------------------------------------
-    def test_action_params(self, logline, params):
-        is_ok=True
-        logline += " ::"
-        for k, v in params.items():
-            logline += " " + k + "=" + str(v)
-            if not v:
-                is_ok = False
-        log.inf(logline)
-        if not is_ok:
-            log.err("Failed, mandatory parameters missing")
-        return is_ok
-
-    #-----------------------------------------------------------------------------------------------
-    def action_db_create(self, a):
-        if not self.test_action_params("Creating db", 
-          OrderedDict({"name":a.name})):
-            return False
-
-        # Run
-        err = "Error"
-        while True:
-            # Get DB name
-            db_name = self.get_db_name(a.name)
-
-            # Check if DB already exists
-            if Utils.is_dir_present(db_name):
-                err += ", db already exists"
-                break
-
-            # Get file name 
-            db_file = self.get_file_name(a.name)
-
-            # Create new DB directory
-            cmd = "mkdir " + db_name                                + " && " + \
-                  "cd " + db_name                                   + " && " + \
-                  "git init "                                       + " && " + \
-                  "git checkout -b " + db_name                      + " && " + \
-                  "touch " + db_file                                + " && " + \
-                  "git add " + db_file                              + " && " + \
-                  "ln -s " + db_file + " " + DB_CURRENT             + " && " + \
-                  "git add " + DB_CURRENT                           + " && " + \
-                  "git commit -m 'Initial commit'"
-            if not ShellCmd(cmd).is_ok():
-                err += ", failed to create DB"
-                break
-
-            # Success !!!!
-            err = None 
-            break
-
-        if err:
-            log.err(err);
-        return not err;
+        # Init globals
+        global log, status
+        log = Logger()
+        status = Status()
 
     #-----------------------------------------------------------------------------------------------
     def run(self):
-        log.inf("Starting piot...")
-
-        # Make sure that data is valid JSON
-        if self.args.data:
-            try:
-                json_object = json.loads(self.args.data)
-            except ValueError as e:
-                log.err("Error, failed to parse data, not a JSON")
-                return False
+        # Intro
+        log.dbg(">" * 80)
+        log.dbg("Starting " + APP_NAME + " @ " + str(Utils.get_timestamp()))
 
         # Run actions
         if self.args.action == "db-create":
-            self.action_db_create(self.args)
+            ActionDbCreate(self.args)
 
         elif self.args.action == "db-write":
-#            self.action_db_write(self.args)
             ActionDbWrite(self.args)
 
         elif self.args.action == "db-read":
-#            self.action_db_read(self.args)
             ActionDbRead(self.args)
 
 #---------------------------------------------------------------------------------------------------
@@ -395,16 +384,14 @@ Fucking main
 if __name__ == "__main__":
     # Parse arguments
     parser = argparse.ArgumentParser(description='Piot tool')
-    parser.add_argument('--action', action='store', default="show-status", help='Action to perform')
+    parser.add_argument('--action', action='store', help='Action to perform')
     parser.add_argument('--name', action='store', help='DB name')
     parser.add_argument('--data', action='store', help='Data in JSON format')
     parser.add_argument('--token', action='store', help='Authentication token')
     parser.add_argument('--filter', action='store', default=".", help='JQ filter')
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
-    parser.add_argument('--dest', action='store', default="/tmp/" + str(os.getpid()), help='Destination where to read to')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
     parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
-    parser.add_argument('--debug', action='store_true', help='Enable debugs')
 
     app = App(parser.parse_args())
     app.run()
