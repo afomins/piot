@@ -10,12 +10,30 @@ import urllib.parse
 import time
 from collections import OrderedDict
 
+from flask import Flask
+from flask_restful import Api, Resource, reqparse, request
+from flask import jsonify, make_response
+
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot"
 CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
+
+#---------------------------------------------------------------------------------------------------
+class Data(Resource):
+    def get(self, name):
+        name = request.args.get('name', default = None, type = str)
+        filter = request.args.get('filter', default = ".", type = str)
+
+        return make_response(jsonify(ActionDbRead(name, filter).status), 200)
+    def post(self, name):
+        return "Not supported", 405
+    def put(self, name):
+        return "Not supported", 405
+    def delete(self, name):
+        return "Not supported", 405
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -315,12 +333,12 @@ class ActionDbWrite(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbRead(ActionCmd):
-    def __init__(self, args):
-        self.param_name = args.name
-        self.param_filter = args.filter
+    def __init__(self, name, filter):
+        self.param_name = name
+        self.param_filter = filter
 
-        super(ActionDbRead, self).__init__(args.action, 
-          OrderedDict({"name":self.param_name, "filter":self.param_filter}))
+        super(ActionDbRead, self).__init__(name, 
+          OrderedDict({"name":name, "filter":filter}))
 
     def run(self):
         # Get DB files
@@ -345,6 +363,21 @@ class ActionDbRead(ActionCmd):
         self.out = cmd.out
 
 #---------------------------------------------------------------------------------------------------
+class ActionRunRest(ActionCmd):
+    def __init__(self, port):
+        self.param_port = port
+
+        super(ActionRunRest, self).__init__("run-rest", 
+          OrderedDict({"port":self.param_port}))
+
+    def run(self):
+        app = Flask(APP_NAME)
+        api = Api(app)
+
+        api.add_resource(Data, "/data/<string:name>")
+        app.run(debug=True, port=self.param_port)
+
+#---------------------------------------------------------------------------------------------------
 """
 Fucking main
 """
@@ -359,6 +392,7 @@ if __name__ == "__main__":
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
     parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
+    parser.add_argument('--port', action='store', default=8888, help='Rest listening port')
     args = parser.parse_args()
 
     # Init globals
@@ -378,4 +412,7 @@ if __name__ == "__main__":
         ActionDbWrite(args)
 
     elif args.action == "db-read":
-        ActionDbRead(args)
+        ActionDbRead(args.name, args.filter)
+
+    elif args.action == "run-rest":
+        ActionRunRest(args.port)
