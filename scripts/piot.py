@@ -18,10 +18,6 @@ TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
 
 #---------------------------------------------------------------------------------------------------
-log = None
-status = None
-
-#---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
     def __init__(self):
         super(Status, self).__init__({})
@@ -160,7 +156,7 @@ class Cmd:
         self.finalize()
 
         # Write log
-        log.log("DBG", "  >> rc  = " + str(self.rc), self.bid, self.bid)
+        log.log("DBG", "  >> rc  = " + str(self.rc), self.bid, False)
         if len(self.out) > 0:
             Utils.log_lines("DBG", "  >> out = ", self.out, self.bid)
         if len(self.err) > 0:
@@ -199,7 +195,8 @@ class ShellCmd(Cmd):
 #---------------------------------------------------------------------------------------------------
 class ActionCmd(Cmd):
     def __init__(self, cmd, params):
-        status.set_action(cmd)
+        self.status = Status()
+        self.status.set_action(cmd)
         super(ActionCmd, self).__init__(cmd, params)
 
     def get_db_name(self, device_name):
@@ -230,7 +227,7 @@ class ActionCmd(Cmd):
         is_ok = True
         for k, v in self.params.items():
             v_str = str(v)
-            status.set_param(k, v_str)
+            self.status.set_param(k, v_str)
 
             if not v:
                 is_ok = False
@@ -240,15 +237,15 @@ class ActionCmd(Cmd):
             self.set_err("Error, mandatory parameters are missing")
 
         # Allocate Batch-ID
-        return log.log("DBG", "Running action :: " + status.to_string(), self.bid, True)
+        return log.log("DBG", "Running action :: " + self.status.to_string(), self.bid, True)
 
     def finalize(self):
-        status.set_success(self.is_ok())
-        status.set_message("" if not self.err else self.err)
-        status.set_out(self.out)
+        self.status.set_success(self.is_ok())
+        self.status.set_message("" if not self.err else self.err)
+        self.status.set_out(self.out)
 
         # Dump status JSON to stdout
-        print(status.to_string())
+        print(self.status.to_string())
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(ActionCmd):
@@ -302,9 +299,7 @@ class ActionDbWrite(ActionCmd):
             return
 
         # Prefix to separate data entries
-        prefix = ", "
-        if Utils.is_file_empty(db_file):
-            prefix = "  "
+        prefix = "  " if Utils.is_file_empty(db_file) else ", "
 
         # Build header
         timestamp = str(Utils.get_timestamp())
@@ -350,34 +345,6 @@ class ActionDbRead(ActionCmd):
         self.out = cmd.out
 
 #---------------------------------------------------------------------------------------------------
-class App:
-    args = None
-
-    def __init__(self, args):
-        self.args = args
-
-        # Init globals
-        global log, status
-        log = Logger()
-        status = Status()
-
-    #-----------------------------------------------------------------------------------------------
-    def run(self):
-        # Intro
-        log.dbg(">" * 80)
-        log.dbg("Starting " + APP_NAME + " @ " + str(Utils.get_timestamp()))
-
-        # Run actions
-        if self.args.action == "db-create":
-            ActionDbCreate(self.args)
-
-        elif self.args.action == "db-write":
-            ActionDbWrite(self.args)
-
-        elif self.args.action == "db-read":
-            ActionDbRead(self.args)
-
-#---------------------------------------------------------------------------------------------------
 """
 Fucking main
 """
@@ -392,6 +359,23 @@ if __name__ == "__main__":
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
     parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
+    args = parser.parse_args()
 
-    app = App(parser.parse_args())
-    app.run()
+    # Init globals
+    global log
+    log = Logger()
+
+    # Intro
+    log.dbg(">" * 80)
+    log.dbg("Starting " + APP_NAME + " @ " + str(Utils.get_timestamp()))
+
+    # Run actions
+    arg = parser.parse_args()
+    if args.action == "db-create":
+        ActionDbCreate(args)
+
+    elif args.action == "db-write":
+        ActionDbWrite(args)
+
+    elif args.action == "db-read":
+        ActionDbRead(args)
