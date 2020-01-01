@@ -6,13 +6,10 @@ import subprocess
 import logging
 import json
 import os
-import urllib.parse
 import time
+import sys
+import urllib.parse
 from collections import OrderedDict
-
-from flask import Flask
-from flask_restful import Api, Resource, reqparse, request
-from flask import jsonify, make_response
 
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot"
@@ -20,20 +17,7 @@ CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
-
-#---------------------------------------------------------------------------------------------------
-class Data(Resource):
-    def get(self, name):
-        name = request.args.get('name', default = None, type = str)
-        filter = request.args.get('filter', default = ".", type = str)
-
-        return make_response(jsonify(ActionDbRead(name, filter).status), 200)
-    def post(self, name):
-        return "Not supported", 405
-    def put(self, name):
-        return "Not supported", 405
-    def delete(self, name):
-        return "Not supported", 405
+REST_API = False
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -57,7 +41,6 @@ class Status(OrderedDict):
                 out = json.loads(out)
             except:
                 out = None
-
         self["out"] = {} if not out else out
 
     def set_message(self, message):
@@ -114,7 +97,7 @@ class Logger:
 
     def __init__(self):
         self.bid = 0
-        self.flog = open(LOG_FILE, "w+")
+        self.flog = sys.stdout if REST_API else open(LOG_FILE, "w+")
 
     def next_bid(self):
         self.bid += 1
@@ -131,12 +114,8 @@ class Logger:
         else:
             prefix_ext += str(bid).zfill(self.BATCH_ID_SIZE) + " "
 
-        # Write debugs to stdout only when explicitly allowed
-        out = prefix_ext + line
-        if prefix != "DBG":
-            print(out)
-
         # Write all messages to log
+        out = prefix_ext + line
         self.flog.write(out + "\n")
 #        self.flog.flush()
         return bid
@@ -263,15 +242,16 @@ class ActionCmd(Cmd):
         self.status.set_out(self.out)
 
         # Dump status JSON to stdout
-        print(self.status.to_string())
+        if not REST_API:
+            print(self.status.to_string())
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(ActionCmd):
-    def __init__(self, args):
-        self.param_name = args.name
+    def __init__(self, name):
+        self.param_name = name
 
-        super(ActionDbCreate, self).__init__(args.action, 
-          OrderedDict({"name":self.param_name}))
+        super(ActionDbCreate, self).__init__("db-create", 
+          OrderedDict({"name":name}))
 
     def run(self):
         # Get DB name
@@ -299,12 +279,12 @@ class ActionDbCreate(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbWrite(ActionCmd):
-    def __init__(self, args):
-        self.param_name = args.name
-        self.param_data = args.data
+    def __init__(self, name, data):
+        self.param_name = name
+        self.param_data = data
 
-        super(ActionDbWrite, self).__init__(args.action, 
-          OrderedDict({"name":self.param_name, "data":self.param_data}))
+        super(ActionDbWrite, self).__init__("db-write", 
+          OrderedDict({"name":name, "data":data}))
 
     def run(self):
         # Validate data
@@ -337,13 +317,13 @@ class ActionDbRead(ActionCmd):
         self.param_name = name
         self.param_filter = filter
 
-        super(ActionDbRead, self).__init__(name, 
+        super(ActionDbRead, self).__init__("db-read", 
           OrderedDict({"name":name, "filter":filter}))
 
     def run(self):
         # Get DB files
         db_name, db_file = self.get_db_files(self.param_name)
-        if not db_name: 
+        if not db_name:
             return
 
         # Read DB
@@ -363,19 +343,56 @@ class ActionDbRead(ActionCmd):
         self.out = cmd.out
 
 #---------------------------------------------------------------------------------------------------
-class ActionRunRest(ActionCmd):
+class ActionError(ActionCmd):
+    def __init__(self):
+        super(ActionError, self).__init__("error", {})
+
+    def run(self):
+        self.set_err("Error, generic fail")
+
+#---------------------------------------------------------------------------------------------------
+class ActionRestApi(ActionCmd):
     def __init__(self, port):
         self.param_port = port
 
-        super(ActionRunRest, self).__init__("run-rest", 
+        super(ActionRestApi, self).__init__("rest-api", 
           OrderedDict({"port":self.param_port}))
 
     def run(self):
+        from flask import Flask, jsonify, make_response
+        from flask_restful import Api, Resource, request
+
+        class RestApi(Resource):
+            def get(self):
+                return self.send_response(ActionError())
+
+            def post(self):
+                return self.send_response(RunAction(request.get_json()))
+
+            def put(self):
+                return self.send_response(ActionError())
+
+            def delete(self):
+                return self.send_response(ActionError())
+
+            def send_response(self, action):
+                return make_response(jsonify(action.status), \
+                    200 if action.is_ok() else 400)
+
         app = Flask(APP_NAME)
         api = Api(app)
 
-        api.add_resource(Data, "/data/<string:name>")
-        app.run(debug=True, port=self.param_port)
+        api.add_resource(RestApi, "/api")
+        app.run(debug=False, port=self.param_port)
+
+#---------------------------------------------------------------------------------------------------
+def RunAction(args):
+    action = args.get("action")
+    if   action == "db-create"  : return ActionDbCreate(args.get("name"))
+    elif action == "db-write"   : return ActionDbWrite(args.get("name"), args.get("data"))
+    elif action == "db-read"    : return ActionDbRead(args.get("name"), args.get("filter"))
+    elif action == "rest-api"   : return ActionRestApi(args.get("port"))
+    else                        : return ActionError()
 
 #---------------------------------------------------------------------------------------------------
 """
@@ -392,27 +409,16 @@ if __name__ == "__main__":
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
     parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
-    parser.add_argument('--port', action='store', default=8888, help='Rest listening port')
+    parser.add_argument('--port', action='store', default=8888, help='RestApi port')
     args = parser.parse_args()
 
-    # Init globals
-    global log
-    log = Logger()
+    # Special handling when rest-api
+    REST_API = args.action == "rest-api"
 
     # Intro
+    log = Logger()
     log.dbg(">" * 80)
     log.dbg("Starting " + APP_NAME + " @ " + str(Utils.get_timestamp()))
 
     # Run actions
-    arg = parser.parse_args()
-    if args.action == "db-create":
-        ActionDbCreate(args)
-
-    elif args.action == "db-write":
-        ActionDbWrite(args)
-
-    elif args.action == "db-read":
-        ActionDbRead(args.name, args.filter)
-
-    elif args.action == "run-rest":
-        ActionRunRest(args.port)
+    RunAction(vars(args))
