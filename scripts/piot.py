@@ -8,6 +8,7 @@ import json
 import os
 import time
 import sys
+import socket
 import urllib.parse
 from collections import OrderedDict
 
@@ -17,7 +18,32 @@ CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
-REST_API = False
+HTTP_SERVER = False
+
+#---------------------------------------------------------------------------------------------------
+class Sensor(OrderedDict):
+    def __init__(self):
+        super(Sensor, self).__init__({})
+
+    def set_type(self, type):
+        self["type"] = type
+        return self
+
+    def set_id(self, id):
+        self["id"] = id
+        return self
+
+    def set_value(self, value):
+        self["value"] = value
+        return self
+
+    def set_system(self, system):
+        self["system"] = system
+        return self
+
+    def set_message(self, message):
+        self["message"] = message
+        return self
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -90,6 +116,25 @@ class Utils:
             pass
         return False
 
+    def read_file(path):
+        body = None
+        try:
+            f = open(path, "r")
+            if f and f.mode == "r":
+                body = f.read()
+        except:
+            pass
+        return body
+
+    def json_to_string(json_obj):
+        try:
+            return str(json.dumps(json_obj))
+        except:
+            return "{}"
+
+    def get_hostname():
+        return socket.gethostname()
+
 #---------------------------------------------------------------------------------------------------
 class Logger:
     BATCH_ID_SIZE = 6
@@ -97,7 +142,7 @@ class Logger:
 
     def __init__(self):
         self.bid = 0
-        self.flog = sys.stdout if REST_API else open(LOG_FILE, "w+")
+        self.flog = sys.stdout if HTTP_SERVER else open(LOG_FILE, "w+")
 
     def next_bid(self):
         self.bid += 1
@@ -234,7 +279,7 @@ class ActionCmd(Cmd):
             self.set_err("Error, mandatory parameters are missing")
 
         # Allocate Batch-ID
-        return log.log("DBG", "Running action :: " + self.status.to_string(), self.bid, True)
+        return log.log("DBG", "Running action :: " + Utils.json_to_string(self.status), self.bid, True)
 
     def finalize(self):
         self.status.set_success(self.is_ok())
@@ -242,7 +287,7 @@ class ActionCmd(Cmd):
         self.status.set_out(self.out)
 
         # Dump status JSON to stdout
-        if not REST_API:
+        if not HTTP_SERVER:
             print(self.status.to_string())
 
 #---------------------------------------------------------------------------------------------------
@@ -342,6 +387,49 @@ class ActionDbRead(ActionCmd):
         # Save output
         self.out = cmd.out
 
+
+#---------------------------------------------------------------------------------------------------
+class ActionSensorReadDs18b20(ActionCmd):
+    DS18B20_PATH = "/sys/bus/w1/devices"
+    DS18B20_DATA = "w1_slave"
+
+    def __init__(self, id):
+        self.param_id = id
+        super(ActionSensorReadDs18b20, self).__init__("sensor-read-ds18b20", 
+          OrderedDict({"id":id}))
+
+    def run(self):
+        value = -42
+        msg = ""
+        while True:
+            # Load modules
+            if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").is_ok():
+                msg = "Error, failed to load sensor modules"
+                break
+
+            # Read sensor data
+            value_raw = Utils.read_file( \
+              self.DS18B20_PATH + "/" + str(self.param_id) + "/" + self.DS18B20_DATA)
+            if not value_raw:
+                msg = "Error, failed to read sensor value"
+                break
+
+            value = value_raw / 1000
+            break
+
+        # Log error
+        if msg != "":
+            log.err(msg)
+
+        # Dump sensor data
+        sensor = Sensor()                           \
+          .set_type("temperature")                  \
+          .set_id(str(self.param_id))               \
+          .set_system(Utils.get_hostname())         \
+          .set_value(value)                         \
+          .set_message(msg) 
+        self.out = Utils.json_to_string(sensor)
+
 #---------------------------------------------------------------------------------------------------
 class ActionError(ActionCmd):
     def __init__(self):
@@ -351,11 +439,11 @@ class ActionError(ActionCmd):
         self.set_err("Error, generic fail")
 
 #---------------------------------------------------------------------------------------------------
-class ActionRestApi(ActionCmd):
+class ActionHttpServer(ActionCmd):
     def __init__(self, port):
         self.param_port = port
 
-        super(ActionRestApi, self).__init__("rest-api", 
+        super(ActionHttpServer, self).__init__("http-server", 
           OrderedDict({"port":self.param_port}))
 
     def run(self):
@@ -388,11 +476,12 @@ class ActionRestApi(ActionCmd):
 #---------------------------------------------------------------------------------------------------
 def RunAction(args):
     action = args.get("action")
-    if   action == "db-create"  : return ActionDbCreate(args.get("name"))
-    elif action == "db-write"   : return ActionDbWrite(args.get("name"), args.get("data"))
-    elif action == "db-read"    : return ActionDbRead(args.get("name"), args.get("filter"))
-    elif action == "rest-api"   : return ActionRestApi(args.get("port"))
-    else                        : return ActionError()
+    if   action == "db-create"              : return ActionDbCreate(args.get("name"))
+    elif action == "db-write"               : return ActionDbWrite(args.get("name"), args.get("data"))
+    elif action == "db-read"                : return ActionDbRead(args.get("name"), args.get("filter"))
+    elif action == "http-server"            : return ActionHttpServer(args.get("port"))
+    elif action == "sensor-read-ds18b20"    : return ActionSensorReadDs18b20(args.get("id"))
+    else                                    : return ActionError()
 
 #---------------------------------------------------------------------------------------------------
 """
@@ -409,11 +498,12 @@ if __name__ == "__main__":
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
     parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
-    parser.add_argument('--port', action='store', default=8888, help='RestApi port')
+    parser.add_argument('--port', action='store', default=8888, help='HTTP port')
+    parser.add_argument('--id', action='store', help='ID of the sensor')
     args = parser.parse_args()
 
-    # Special handling when rest-api
-    REST_API = args.action == "rest-api"
+    # Special handling when http-server
+    HTTP_SERVER = args.action == "http-server"
 
     # Intro
     log = Logger()
