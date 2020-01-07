@@ -23,27 +23,21 @@ HTTP_SERVER = False
 #---------------------------------------------------------------------------------------------------
 class Sensor(OrderedDict):
     def __init__(self):
-        super(Sensor, self).__init__({})
+        super(Sensor, self).__init__()
+        self.header()
 
-    def set_type(self, type):
-        self["type"] = type
-        return self
+    def header(self):
+        self["header"] = OrderedDict({                      \
+            "hostname"      : Utils.get_hostname(),         \
+            "uptime"        : Utils.get_uptime(),           \
+            "timestamp"     : Utils.get_timestamp(),        \
+            "time"          : Utils.get_time_str()})
+        return self["header"]
 
-    def set_id(self, id):
-        self["id"] = id
-        return self
-
-    def set_value(self, value):
-        self["value"] = value
-        return self
-
-    def set_system(self, system):
-        self["system"] = system
-        return self
-
-    def set_message(self, message):
-        self["message"] = message
-        return self
+    def data(self):
+        if "data" not in self:
+            self["data"] = OrderedDict()
+        return self["data"]
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -52,14 +46,17 @@ class Status(OrderedDict):
 
     def set_action(self, action):
         self["action"] = action
+        return self
 
     def set_param(self, name, value):
         if "params" not in self:
             self["params"] = OrderedDict({})
         self["params"][name] = value
+        return self
 
     def set_success(self, success):
         self["success"] = success
+        return self
 
     def set_out(self, out):
         if out:
@@ -68,9 +65,11 @@ class Status(OrderedDict):
             except:
                 out = None
         self["out"] = {} if not out else out
+        return self
 
     def set_message(self, message):
         self["message"] = message
+        return self
 
     def to_string(self):
         try:
@@ -82,6 +81,9 @@ class Status(OrderedDict):
 class Utils:
     def get_timestamp():
         return int(time.time())
+
+    def get_time_str(fmt = "%Y/%m/%d-%H:%M:%S"):
+        return time.strftime(fmt, time.gmtime())
 
     def is_dir_present(path):
         return os.path.isdir(path)
@@ -134,6 +136,11 @@ class Utils:
 
     def get_hostname():
         return socket.gethostname()
+
+    def get_uptime():
+        with open('/proc/uptime', 'r') as f:
+            sec = float(f.readline().split()[0])
+        return int(sec)
 
 #---------------------------------------------------------------------------------------------------
 class Logger:
@@ -283,7 +290,8 @@ class ActionCmd(Cmd):
 
     def finalize(self):
         self.status.set_success(self.is_ok())
-        self.status.set_message("" if not self.err else self.err)
+        if self.err:
+            self.status.set_message(self.err)
         self.status.set_out(self.out)
 
         # Dump status JSON to stdout
@@ -384,26 +392,35 @@ class ActionDbRead(ActionCmd):
         if not cmd.is_ok():
             return self.set_err("Error, failed to apply filter")
 
-        # Save output
-        self.out = cmd.out
-
+        # Save output as array of object
+        if cmd.out[0] == '{':
+            self.out = "[" + cmd.out + "]"
+        else:
+            self.out = cmd.out
 
 #---------------------------------------------------------------------------------------------------
-class ActionSensorReadDs18b20(ActionCmd):
+class ActionSensor(ActionCmd):
+    def __init__(self, name, type, params):
+        self.sensor = Sensor()
+        self.sensor.data()["type"] = type
+        super(ActionSensor, self).__init__(name, params)
+
+#---------------------------------------------------------------------------------------------------
+class ActionSensorDs18b20(ActionSensor):
     DS18B20_PATH = "/sys/bus/w1/devices"
     DS18B20_DATA = "w1_slave"
 
     def __init__(self, id):
         self.param_id = id
-        super(ActionSensorReadDs18b20, self).__init__("sensor-read-ds18b20", 
+        super(ActionSensorDs18b20, self).__init__("sensor-ds18b20", "temperature",
           OrderedDict({"id":id}))
 
     def run(self):
         value = -42
-        msg = ""
+        msg = None
         while True:
             # Load modules
-            if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").is_ok():
+            if not ShellCmd("modprobe w1-gpio && sudo modprobe w1-therm").is_ok():
                 msg = "Error, failed to load sensor modules"
                 break
 
@@ -417,18 +434,14 @@ class ActionSensorReadDs18b20(ActionCmd):
             value = value_raw / 1000
             break
 
-        # Log error
-        if msg != "":
-            log.err(msg)
+        d = self.sensor.data()
+        d["id"] = str(self.param_id)
+        d["value"] = value
 
-        # Dump sensor data
-        sensor = Sensor()                           \
-          .set_type("temperature")                  \
-          .set_id(str(self.param_id))               \
-          .set_system(Utils.get_hostname())         \
-          .set_value(value)                         \
-          .set_message(msg) 
-        self.out = Utils.json_to_string(sensor)
+        if msg:
+            d["message"] = msg
+            log.err(msg)
+        self.out = Utils.json_to_string(self.sensor)
 
 #---------------------------------------------------------------------------------------------------
 class ActionError(ActionCmd):
@@ -476,12 +489,12 @@ class ActionHttpServer(ActionCmd):
 #---------------------------------------------------------------------------------------------------
 def RunAction(args):
     action = args.get("action")
-    if   action == "db-create"              : return ActionDbCreate(args.get("name"))
-    elif action == "db-write"               : return ActionDbWrite(args.get("name"), args.get("data"))
-    elif action == "db-read"                : return ActionDbRead(args.get("name"), args.get("filter"))
-    elif action == "http-server"            : return ActionHttpServer(args.get("port"))
-    elif action == "sensor-read-ds18b20"    : return ActionSensorReadDs18b20(args.get("id"))
-    else                                    : return ActionError()
+    if   action == "db-create"      : return ActionDbCreate(args.get("name"))
+    elif action == "db-write"       : return ActionDbWrite(args.get("name"), args.get("data"))
+    elif action == "db-read"        : return ActionDbRead(args.get("name"), args.get("filter"))
+    elif action == "http-server"    : return ActionHttpServer(args.get("port"))
+    elif action == "sensor-ds18b20" : return ActionSensorDs18b20(args.get("id"))
+    else                            : return ActionError()
 
 #---------------------------------------------------------------------------------------------------
 """
