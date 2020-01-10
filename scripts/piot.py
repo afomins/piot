@@ -27,11 +27,12 @@ class Sensor(OrderedDict):
         self.header()
 
     def header(self):
-        self["header"] = OrderedDict({                      \
-            "hostname"      : Utils.get_hostname(),         \
-            "uptime"        : Utils.get_uptime(),           \
-            "timestamp"     : Utils.get_timestamp(),        \
-            "time"          : Utils.get_time_str()})
+        if "header" not in self:
+            self["header"] = OrderedDict({                      \
+                "hostname"      : Utils.get_hostname(),         \
+                "uptime"        : Utils.get_uptime(),           \
+                "timestamp"     : Utils.get_timestamp(),        \
+                "time"          : Utils.get_time_str()})
         return self["header"]
 
     def data(self):
@@ -111,12 +112,7 @@ class Utils:
         Utils.split_lines(line, prefix, cb)
 
     def is_valid_json_string(str):
-        try:
-            json.loads(str)
-            return True
-        except:
-            pass
-        return False
+        return Utils.string_to_json(str) != None
 
     def read_file(path):
         body = None
@@ -134,6 +130,12 @@ class Utils:
         except:
             return "{}"
 
+    def string_to_json(str):
+        try:
+            return json.loads(str)
+        except:
+            return None
+
     def get_hostname():
         return socket.gethostname()
 
@@ -143,13 +145,35 @@ class Utils:
         return int(sec)
 
 #---------------------------------------------------------------------------------------------------
-class Logger:
+class Writer:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, str, do_flush=True, new_line=True):
+        if not self.stream:
+            return
+        if new_line:
+            str += "\n"
+        self.stream.write(str)
+        if do_flush:
+            self.stream.flush()
+
+#---------------------------------------------------------------------------------------------------
+class Logger(Writer):
     BATCH_ID_SIZE = 6
     BATCH_ID_FILLER = " " * BATCH_ID_SIZE
 
-    def __init__(self):
+    def __init__(self, dest):
         self.bid = 0
-        self.flog = sys.stdout if HTTP_SERVER else open(LOG_FILE, "w+")
+        stream = None
+        if dest == "stdout":
+            stream = sys.stdout
+        else:
+            try:
+                stream = open(LOG_FILE, "w+")
+            except:
+                pass
+        super(Logger, self).__init__(stream)
 
     def next_bid(self):
         self.bid += 1
@@ -162,14 +186,12 @@ class Logger:
             bid = self.next_bid()
 
         if bid == None:
-            prefix_ext += self.BATCH_ID_FILLER + " "
+            prefix_ext += Logger.BATCH_ID_FILLER + " "
         else:
-            prefix_ext += str(bid).zfill(self.BATCH_ID_SIZE) + " "
+            prefix_ext += str(bid).zfill(Logger.BATCH_ID_SIZE) + " "
 
         # Write all messages to log
-        out = prefix_ext + line
-        self.flog.write(out + "\n")
-#        self.flog.flush()
+        self.write(prefix_ext + line, False)
         return bid
 
     def dbg(self, line, bid = None, next = False):
@@ -183,16 +205,13 @@ class Logger:
 
 #---------------------------------------------------------------------------------------------------
 class Cmd:
-    cmd = ""
-    params = {}
-    bid = None
-    out = ""
-    err = ""
-    rc = 0
-
     def __init__(self, cmd, params):
         self.cmd = cmd
         self.params = params
+        self.out = ""
+        self.err = ""
+        self.rc = 0
+        self.bid = 0
 
         # Prepare command 
         self.bid = self.prepare()
@@ -224,7 +243,7 @@ class Cmd:
         return self.rc == 0
 
     def set_err(self, msg, rc = -1):
-        self.err = msg
+        self.err = msg if msg else "Generic error"
         self.rc = rc
 
 #---------------------------------------------------------------------------------------------------
@@ -268,7 +287,7 @@ class ActionCmd(Cmd):
             self.set_err("Error, DB file is missing :: file=" + name)
             return None, None
 
-        # Return dit + file tuple
+        # Return db + file tuple
         return db_name, db_file
 
     def prepare(self):
@@ -296,7 +315,7 @@ class ActionCmd(Cmd):
 
         # Dump status JSON to stdout
         if not HTTP_SERVER:
-            print(self.status.to_string())
+            out.write(self.status.to_string())
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(ActionCmd):
@@ -392,7 +411,7 @@ class ActionDbRead(ActionCmd):
         if not cmd.is_ok():
             return self.set_err("Error, failed to apply filter")
 
-        # Save output as array of object
+        # Save output as array of objects
         if cmd.out[0] == '{':
             self.out = "[" + cmd.out + "]"
         else:
@@ -401,18 +420,31 @@ class ActionDbRead(ActionCmd):
 #---------------------------------------------------------------------------------------------------
 class ActionSensor(ActionCmd):
     def __init__(self, name, type, params):
-        self.sensor = Sensor()
-        self.sensor.data()["type"] = type
         super(ActionSensor, self).__init__(name, params)
 
 #---------------------------------------------------------------------------------------------------
-class ActionSensorDs18b20(ActionSensor):
+class ActionSensorTemperature(ActionSensor):
+    def __init__(self, name, params):
+        super(ActionSensorTemperature, self).__init__(name, "temperature", params)
+
+    def BuildSensorData(self, id, value, message):
+        sensor = Sensor()
+        d = sensor.data()
+        d["type"] = "temperature"
+        d["id"] = id
+        d["value"] = value
+        if message:
+            d["message"] = message
+        return sensor
+
+#---------------------------------------------------------------------------------------------------
+class ActionSensorDs18b20(ActionSensorTemperature):
     DS18B20_PATH = "/sys/bus/w1/devices"
     DS18B20_DATA = "w1_slave"
 
     def __init__(self, id):
         self.param_id = id
-        super(ActionSensorDs18b20, self).__init__("sensor-ds18b20", "temperature",
+        super(ActionSensorDs18b20, self).__init__("sensor-ds18b20",
           OrderedDict({"id":id}))
 
     def run(self):
@@ -434,21 +466,21 @@ class ActionSensorDs18b20(ActionSensor):
             value = value_raw / 1000
             break
 
-        d = self.sensor.data()
-        d["id"] = str(self.param_id)
-        d["value"] = value
+        # Save sensor data
+        sensor = self.BuildSensorData(str(self.param_id), value, msg)
+        self.out = Utils.json_to_string(sensor)
 
         if msg:
-            d["message"] = msg
             log.err(msg)
-        self.out = Utils.json_to_string(self.sensor)
 
 #---------------------------------------------------------------------------------------------------
 class ActionError(ActionCmd):
-    def __init__(self):
+    def __init__(self, args):
+        self.args = args
         super(ActionError, self).__init__("error", {})
 
     def run(self):
+        self.out = Utils.json_to_string(self.args)
         self.set_err("Error, generic fail")
 
 #---------------------------------------------------------------------------------------------------
@@ -487,14 +519,77 @@ class ActionHttpServer(ActionCmd):
         app.run(debug=False, port=self.param_port)
 
 #---------------------------------------------------------------------------------------------------
+class ActionHttpClient(ActionCmd):
+    def __init__(self, name, id, server, token):
+        self.param_name = name
+        self.param_id = id
+        self.param_server = server
+        self.param_token = token
+
+        super(ActionHttpClient, self).__init__("http-client", 
+          OrderedDict({"name":name, "id":id, "server":server, "token":token}))
+
+    def run(self):
+        # Begin array
+        out.write("[", new_line=False)
+
+        # Run target action
+        action = None
+        if self.param_name == "sensor-ds18b20":
+            action = ActionSensorDs18b20(self.param_id)
+        else:
+            action = ActionError()
+
+        # Separate actions in array
+        out.write(",", new_line=False)
+
+        while True:
+            # Exit if action failed
+            if not action.is_ok():
+                self.set_err(action.err)
+                break
+
+            # Extract data from action
+            json = Utils.string_to_json(action.out)
+            if json and "data" in json:
+                json = json["data"]
+            else:
+                self.set_err("Error, failed to extract sensor data")
+                break
+
+            str = "{\"action\":\"db-write\", \"name\":\"test\", \"data\":" + Utils.json_to_string(json) + "}"
+            out.write(">>>>>>>>>>>>>>>>>>>>")
+            out.write(str)
+            out.write("<<<<<<<<<<<<<<<<<<<<")
+            
+            
+            # Upload json to server
+            cmd_str = "curl -X POST -s " + self.param_server + "/api"               + \
+                                  " -H \"Content-Type: application/json\""          + \
+                                  " -d '" + str + "'"
+                                  
+            # Utils.json_to_string(json)
+            cmd = ShellCmd(cmd_str)
+            if not cmd.is_ok():
+                self.set_err("Error, failed to upload sensor data")
+            break
+
+    def finalize(self):
+        super(ActionHttpClient, self).finalize()
+
+        # End array
+        out.write("]", new_line=False)
+
+#---------------------------------------------------------------------------------------------------
 def RunAction(args):
     action = args.get("action")
-    if   action == "db-create"      : return ActionDbCreate(args.get("name"))
-    elif action == "db-write"       : return ActionDbWrite(args.get("name"), args.get("data"))
-    elif action == "db-read"        : return ActionDbRead(args.get("name"), args.get("filter"))
-    elif action == "http-server"    : return ActionHttpServer(args.get("port"))
-    elif action == "sensor-ds18b20" : return ActionSensorDs18b20(args.get("id"))
-    else                            : return ActionError()
+    if   action == "db-create"          : return ActionDbCreate(args.get("name"))
+    elif action == "db-write"           : return ActionDbWrite(args.get("name"), args.get("data"))
+    elif action == "db-read"            : return ActionDbRead(args.get("name"), args.get("filter"))
+    elif action == "sensor-ds18b20"     : return ActionSensorDs18b20(args.get("id"))
+    elif action == "http-server"        : return ActionHttpServer(args.get("port"))
+    elif action == "http-client"        : return ActionHttpClient(args.get("name"), args.get("id"), args.get("server"), args.get("token"))
+    else                                : return ActionError(args)
 
 #---------------------------------------------------------------------------------------------------
 """
@@ -503,10 +598,11 @@ Fucking main
 if __name__ == "__main__":
     # Parse arguments
     parser = argparse.ArgumentParser(description='Piot tool')
-    parser.add_argument('--action', action='store', help='Action to perform')
-    parser.add_argument('--name', action='store', help='DB name')
+    parser.add_argument('--action', action='store', help='Action')
+    parser.add_argument('--name', action='store', help='Name of db/sensor')
     parser.add_argument('--data', action='store', help='Data in JSON format')
     parser.add_argument('--token', action='store', help='Authentication token')
+    parser.add_argument('--server', action='store', help='Adress of of the server')
     parser.add_argument('--filter', action='store', default=".", help='JQ filter')
     parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
     parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
@@ -518,10 +614,13 @@ if __name__ == "__main__":
     # Special handling when http-server
     HTTP_SERVER = args.action == "http-server"
 
-    # Intro
-    log = Logger()
+    # Log writer
+    log = Logger("stdout" if HTTP_SERVER else LOG_FILE)
     log.dbg(">" * 80)
     log.dbg("Starting " + APP_NAME + " @ " + str(Utils.get_timestamp()))
+
+    # Stdout writer
+    out = Writer(sys.stdout)
 
     # Run actions
     RunAction(vars(args))
