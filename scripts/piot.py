@@ -31,8 +31,7 @@ class Sensor(OrderedDict):
             self["header"] = OrderedDict({                      \
                 "hostname"      : Utils.get_hostname(),         \
                 "uptime"        : Utils.get_uptime(),           \
-                "timestamp"     : Utils.get_timestamp(),        \
-                "time"          : Utils.get_time_str()})
+                "timestamp"     : Utils.get_timestamp()})
         return self["header"]
 
     def data(self):
@@ -61,10 +60,7 @@ class Status(OrderedDict):
 
     def set_out(self, out):
         if out:
-            try:
-                out = json.loads(out)
-            except:
-                out = None
+            out = Utils.string_to_json(out)
         self["out"] = {} if not out else out
         return self
 
@@ -73,10 +69,7 @@ class Status(OrderedDict):
         return self
 
     def to_string(self):
-        try:
-            return str(json.dumps(self))
-        except:
-            return "{}"
+        return Utils.json_to_string(self)
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
@@ -211,12 +204,12 @@ class Cmd:
         self.out = ""
         self.err = ""
         self.rc = 0
-        self.bid = 0
+        self.bid = None
 
         # Prepare command 
         self.bid = self.prepare()
 
-        # Run command
+        # Run commandsete
         if self.is_ok():
             self.run()
 
@@ -242,9 +235,12 @@ class Cmd:
     def is_ok(self):
         return self.rc == 0
 
-    def set_err(self, msg, rc = -1):
-        self.err = msg if msg else "Generic error"
+    def set_err(self, err, rc = -1):
+        self.err = err if err else "Generic error"
         self.rc = rc
+
+    def set_out(self, out):
+        self.out = out
 
 #---------------------------------------------------------------------------------------------------
 class ShellCmd(Cmd):
@@ -257,12 +253,13 @@ class ShellCmd(Cmd):
     def run(self):
         ret = subprocess.run(self.cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.out = ret.stdout.decode("utf-8").strip()
-        self.err = ret.stderr.decode("utf-8").strip() 
+        self.err = ret.stderr.decode("utf-8").strip()
         self.rc = ret.returncode
 
 #---------------------------------------------------------------------------------------------------
 class ActionCmd(Cmd):
     def __init__(self, cmd, params):
+        self.out_json = {}
         self.status = Status()
         self.status.set_action(cmd)
         super(ActionCmd, self).__init__(cmd, params)
@@ -315,7 +312,7 @@ class ActionCmd(Cmd):
 
         # Dump status JSON to stdout
         if not HTTP_SERVER:
-            out.write(self.status.to_string())
+            out.write(self.status.to_string(), do_flush=False)
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(ActionCmd):
@@ -413,9 +410,9 @@ class ActionDbRead(ActionCmd):
 
         # Save output as array of objects
         if cmd.out[0] == '{':
-            self.out = "[" + cmd.out + "]"
+            self.set_out("[" + cmd.out + "]")
         else:
-            self.out = cmd.out
+            self.set_out(cmd.out)
 
 #---------------------------------------------------------------------------------------------------
 class ActionSensor(ActionCmd):
@@ -468,7 +465,7 @@ class ActionSensorDs18b20(ActionSensorTemperature):
 
         # Save sensor data
         sensor = self.BuildSensorData(str(self.param_id), value, msg)
-        self.out = Utils.json_to_string(sensor)
+        self.set_out(Utils.json_to_string(sensor))
 
         if msg:
             log.err(msg)
@@ -480,7 +477,7 @@ class ActionError(ActionCmd):
         super(ActionError, self).__init__("error", {})
 
     def run(self):
-        self.out = Utils.json_to_string(self.args)
+        self.set_out(self.args)
         self.set_err("Error, generic fail")
 
 #---------------------------------------------------------------------------------------------------
@@ -497,16 +494,16 @@ class ActionHttpServer(ActionCmd):
 
         class RestApi(Resource):
             def get(self):
-                return self.send_response(ActionError())
+                return self.send_response(ActionError("RestApi::get"))
 
             def post(self):
                 return self.send_response(RunAction(request.get_json()))
 
             def put(self):
-                return self.send_response(ActionError())
+                return self.send_response(ActionError("RestApi::put"))
 
             def delete(self):
-                return self.send_response(ActionError())
+                return self.send_response(ActionError("RestApi::delete"))
 
             def send_response(self, action):
                 return make_response(jsonify(action.status), \
@@ -520,76 +517,88 @@ class ActionHttpServer(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 class ActionHttpClient(ActionCmd):
-    def __init__(self, name, id, server, token):
-        self.param_name = name
-        self.param_id = id
+    def __init__(self, server, auth_token, data):
         self.param_server = server
-        self.param_token = token
+        self.param_auth_token = auth_token
+        self.param_data = data
 
         super(ActionHttpClient, self).__init__("http-client", 
-          OrderedDict({"name":name, "id":id, "server":server, "token":token}))
+            OrderedDict({"server":server, "auth_token":auth_token, "data":data}))
 
     def run(self):
-        # Begin array
-        out.write("[", new_line=False)
+        # Parse data to json
+        if not Utils.is_valid_json_string(self.param_data):
+            return self.set_err("Error, failed to parse data")
 
-        # Run target action
-        action = None
-        if self.param_name == "sensor-ds18b20":
-            action = ActionSensorDs18b20(self.param_id)
-        else:
-            action = ActionError()
+        # Upload json to server
+        cmd_str = "curl -X POST -s " + self.param_server + "/api"               + \
+                              " -H \"Content-Type: application/json\""          + \
+                              " -d '" + self.param_data + "'"
+        cmd = ShellCmd(cmd_str)
+        if not cmd.is_ok():
+            return self.set_err("Error, failed to upload data to server")
 
-        # Separate actions in array
-        out.write(",", new_line=False)
+        # Check if server responded with valid json
+        resp_json = Utils.string_to_json(cmd.out)
+        if not resp_json or "success" not in resp_json or "out" not in resp_json: 
+            return self.set_err("Error, bad server response")
 
-        while True:
-            # Exit if action failed
-            if not action.is_ok():
-                self.set_err(action.err)
-                break
+        # Check if server succeed
+        if not resp_json["success"]: 
+            return self.set_err("Error, server failed")
 
-            # Extract data from action
-            json = Utils.string_to_json(action.out)
-            if json and "data" in json:
-                json = json["data"]
-            else:
-                self.set_err("Error, failed to extract sensor data")
-                break
-
-            str = "{\"action\":\"db-write\", \"name\":\"test\", \"data\":" + Utils.json_to_string(json) + "}"
-            out.write(">>>>>>>>>>>>>>>>>>>>")
-            out.write(str)
-            out.write("<<<<<<<<<<<<<<<<<<<<")
-            
-            
-            # Upload json to server
-            cmd_str = "curl -X POST -s " + self.param_server + "/api"               + \
-                                  " -H \"Content-Type: application/json\""          + \
-                                  " -d '" + str + "'"
-                                  
-            # Utils.json_to_string(json)
-            cmd = ShellCmd(cmd_str)
-            if not cmd.is_ok():
-                self.set_err("Error, failed to upload sensor data")
-            break
-
-    def finalize(self):
-        super(ActionHttpClient, self).finalize()
-
-        # End array
-        out.write("]", new_line=False)
+        # Inherit output from response
+        self.set_out(Utils.json_to_string(resp_json["out"]))
 
 #---------------------------------------------------------------------------------------------------
-def RunAction(args):
-    action = args.get("action")
-    if   action == "db-create"          : return ActionDbCreate(args.get("name"))
-    elif action == "db-write"           : return ActionDbWrite(args.get("name"), args.get("data"))
-    elif action == "db-read"            : return ActionDbRead(args.get("name"), args.get("filter"))
-    elif action == "sensor-ds18b20"     : return ActionSensorDs18b20(args.get("id"))
-    elif action == "http-server"        : return ActionHttpServer(args.get("port"))
-    elif action == "http-client"        : return ActionHttpClient(args.get("name"), args.get("id"), args.get("server"), args.get("token"))
-    else                                : return ActionError(args)
+def RunAction(params):
+    action = params.get("action")
+    if action == "db-create": 
+        return ActionDbCreate(params.get("name"))
+
+    elif action == "db-write":
+        # NOTE: DATA is STRING when invoking from CLI 
+        #       DATA is JSON when invoking from HTTP-SERVER
+        data = params.get("data")
+        data_str = Utils.json_to_string(data) if isinstance(data, dict) else data
+        return ActionDbWrite(params.get("name"), data_str)
+
+    elif action == "db-read": 
+        return ActionDbRead(params.get("name"), params.get("filter"))
+
+    elif action == "sensor-ds18b20":
+        return ActionSensorDs18b20(params.get("id"))
+
+    elif action == "http-server":
+        return ActionHttpServer(params.get("port"))
+
+    elif action == "http-client":
+        return ActionHttpClient(params.get("server"), params.get("auth_token"), params.get("data"))
+
+    elif action == "http-client-sensor-ds18b20":
+        # Read sensor
+        params["action"] = "sensor-ds18b20"
+        sensor_action = RunAction(params)
+        if not sensor_action.is_ok():
+            return sensor_action
+
+        # Parse json
+        if not Utils.is_valid_json_string(sensor_action.out):
+             return sensor_action
+
+        # Run HTTP client
+        params["action"] = "http-client"
+        params["data"] = Utils.json_to_string({"action":"db-write", "name":params.get("name"), "data": sensor_action.out})
+        return RunAction(params)
+
+    elif action == "http-client-db-read":
+        # Run HTTP client
+        params["action"] = "http-client"
+        params["data"] = Utils.json_to_string({"action":"db-read", "name":params.get("name"), "filter": params.get("filter")})
+        return RunAction(params)
+
+    else: 
+        return ActionError(Utils.json_to_string(params))
 
 #---------------------------------------------------------------------------------------------------
 """
@@ -599,16 +608,13 @@ if __name__ == "__main__":
     # Parse arguments
     parser = argparse.ArgumentParser(description='Piot tool')
     parser.add_argument('--action', action='store', help='Action')
-    parser.add_argument('--name', action='store', help='Name of db/sensor')
-    parser.add_argument('--data', action='store', help='Data in JSON format')
-    parser.add_argument('--token', action='store', help='Authentication token')
-    parser.add_argument('--server', action='store', help='Adress of of the server')
-    parser.add_argument('--filter', action='store', default=".", help='JQ filter')
-    parser.add_argument('--limit', action='store', default=0, help='Max number of JSON entries to read')
-    parser.add_argument('--time-begin', action='store', default=0, help='Beginning of selection timeframe')
-    parser.add_argument('--time-end', action='store', default=0, help='End of selection timeframe')
-    parser.add_argument('--port', action='store', default=8888, help='HTTP port')
+    parser.add_argument('--name', action='store', help='Name of the db')
     parser.add_argument('--id', action='store', help='ID of the sensor')
+    parser.add_argument('--data', action='store', help='Data of the sensor')
+    parser.add_argument('--filter', action='store', default=".", help='JQ filter')
+    parser.add_argument('--auth-token', action='store', help='Authentication token')
+    parser.add_argument('--server', action='store', help='Adress of the server (e.g. http://localhost:8888)')
+    parser.add_argument('--port', action='store', default=8888, help='Listening port of the server')
     args = parser.parse_args()
 
     # Special handling when http-server
@@ -623,4 +629,5 @@ if __name__ == "__main__":
     out = Writer(sys.stdout)
 
     # Run actions
-    RunAction(vars(args))
+    action = RunAction(vars(args))
+    sys.exit(action.rc)
