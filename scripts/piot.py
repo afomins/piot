@@ -174,7 +174,6 @@ class Logger(Writer):
         else:
             prefix_ext += str(bid).zfill(Logger.BATCH_ID_SIZE) + " "
 
-        # Write all messages to log
         self.Write(prefix_ext + line, False)
         return bid
 
@@ -236,7 +235,7 @@ class Cmd(CmdResult):
         # Prepare command 
         self.bid = self.Prepare()
 
-        # Run commandsete
+        # Run command
         if self.Ok():
             self.Run()
 
@@ -288,7 +287,7 @@ class ActionCmd(Cmd):
         timestamp=str(Utils.GetTimestamp())
         return "dev-" + device_name + "-" + timestamp + ".json"
 
-    def GetDbFiles(self, name):            
+    def GetDbFiles(self, name):
         # Get DB name
         db_name = self.GetDbName(name)
         if not Utils.IsDirPresent(db_name):
@@ -319,7 +318,9 @@ class ActionCmd(Cmd):
             self.SetErr("Error, mandatory parameters are missing")
 
         # Allocate Batch-ID
-        return log.Log("DBG", "Running action :: " + Utils.JsonToStr(self.status), self.bid, True)
+        bid = log.Log("DBG", "", self.bid, True)
+        log.Log("DBG", "Running action :: " + Utils.JsonToStr(self.status), bid, False)
+        return bid
 
     def Finalize(self):
         # Set success
@@ -464,8 +465,8 @@ class ActionSensorDs18b20(ActionSensorTemperature):
         value = -42
         msg = None
         while True:
-            # Load modules
-            if not ShellCmd("modprobe w1-gpio && sudo modprobe w1-therm").Ok():
+            # Load kernel modules
+            if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
                 msg = "Error, failed to load sensor modules"
                 break
 
@@ -509,13 +510,33 @@ class ActionHttpServer(ActionCmd):
     def Run(self):
         from flask import Flask, jsonify, make_response
         from flask_restful import Api, Resource, request
+#        from werkzeug.serving import WSGIRequestHandler
 
         class RestApi(Resource):
             def get(self):
-                return self.SendResponse(ActionError("Error, GET not supported"))
+                resp = make_response(jsonify({"value":42}), 200)
+#                resp.mimetype = "application/json"
+                return resp
+
+#                return self.SendResponse(ActionError("Error, GET not supported"))
 
             def post(self):
-                return self.SendResponse(RunAction(request.get_json(), False))
+                json = None
+                if request.is_json:
+                    json = request.get_json()
+                    log.Dbg("Incoming JSON request")
+                else:
+                    json_str = None
+                    d = request.get_data(as_text=True)
+                    if d and len(d) >= 4 and d[0] == d[1] == '{' and d[-1] == d[-2] == '}':
+                        json_str = d[1:-1]
+
+                    json = Utils.StrToJson(json_str) if json_str else None
+                    log.Dbg("Incoming JSON-HACK request, status=" + "ok" if json else "not-ok")
+
+                if not json:
+                    json = {"fuck":"off"}
+                return self.SendResponse(RunAction(json, False))
 
             def put(self):
                 return self.SendResponse(ActionError("Error, PUT not supported"))
@@ -531,6 +552,7 @@ class ActionHttpServer(ActionCmd):
         api = Api(app)
 
         api.add_resource(RestApi, "/api")
+#        WSGIRequestHandler.protocol_version = "HTTP/1.1"
         app.run(debug=False, port=self.p_port)
 
 #---------------------------------------------------------------------------------------------------
@@ -551,7 +573,7 @@ class ActionHttpClient(ActionCmd):
                               " -d '" +  data_str + "'"
         cmd = ShellCmd(cmd_str)
         if not cmd.Ok():
-            return self.set_err("Error, failed to upload data to server")
+            return self.SetErr("Error, failed to upload data to server")
 
         # Check if server responded with valid json
         resp = cmd.OutJson()
@@ -567,9 +589,10 @@ class ActionHttpClient(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(p, dump_status=True):
-    action = None
-    action_name = p.get("action")
     while True:
+        action = None
+        action_name = p.get("action") if p else None
+
         # db-create
         if action_name == "db-create": 
             action = ActionDbCreate(p.get("db-name"))
@@ -616,7 +639,7 @@ def RunAction(p, dump_status=True):
 
         # error
         else: 
-            action = actActionError("Error, unknown action", p)
+            action = ActionError("Error, unknown action", p)
         break
 
     # Dump status to stdout
@@ -633,17 +656,17 @@ if __name__ == "__main__":
     # Parse arguments
     parser = argparse.ArgumentParser(description='Piot tool')
     parser.add_argument('--action', action='store', 
-        help='Action')
+        help='Name of the action to perform')
     parser.add_argument('--db-name', action='store', 
         help='Name of the db')
     parser.add_argument('--sensor-id', action='store', 
         help='ID of the sensor')
     parser.add_argument('--data', action='store', type=json.loads, 
-        help='Data in json format')
+        help='Data in JSON format')
     parser.add_argument('--filter', action='store', default=".", 
-        help='JQ filter')
+        help='JQ filter that will be applied on top of JSON output')
     parser.add_argument('--auth-token', action='store', 
-        help='Authentication token')
+        help='Authentication token when connecting to server')
     parser.add_argument('--server', action='store', 
         help='Adress of the server (e.g. http://localhost:8888)')
     parser.add_argument('--port', action='store', type=int, default=8888, 
