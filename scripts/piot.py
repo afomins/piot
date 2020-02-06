@@ -26,17 +26,17 @@ class Sensor(OrderedDict):
         self.Header()
 
     def Header(self):
-        if "header" not in self:
-            self["header"] = OrderedDict({                      \
+        if "sensor-header" not in self:
+            self["sensor-header"] = OrderedDict({               \
                 "hostname"      : Utils.GetHostname(),          \
                 "uptime"        : Utils.GetUptime(),            \
                 "timestamp"     : Utils.GetTimestamp()})
-        return self["header"]
+        return self["sensor-header"]
 
     def Data(self):
-        if "data" not in self:
-            self["data"] = OrderedDict()
-        return self["data"]
+        if "sensor-data" not in self:
+            self["sensor-data"] = OrderedDict()
+        return self["sensor-data"]
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -389,9 +389,9 @@ class ActionDbWrite(ActionCmd):
         header = "{\"timestamp\":" + timestamp + "}"
 
         # Write current file
-        cmd = "echo '" + prefix + "{ "                          + \
-                    "\"header\":" + header + ","                + \
-                    "\"data\":" + Utils.JsonToStr(self.p_data)  + \
+        cmd = "echo '" + prefix + "{ "                              + \
+                    "\"db-header\":" + header + ","                 + \
+                    "\"db-data\":" + Utils.JsonToStr(self.p_data)   + \
                "}' >> " + db_file
         if not ShellCmd(cmd).Ok():
             return self.SetErr("Error, failed to write data")
@@ -510,49 +510,49 @@ class ActionHttpServer(ActionCmd):
     def Run(self):
         from flask import Flask, jsonify, make_response
         from flask_restful import Api, Resource, request
-#        from werkzeug.serving import WSGIRequestHandler
 
         class RestApi(Resource):
             def get(self):
-                resp = make_response(jsonify({"value":42}), 200)
-#                resp.mimetype = "application/json"
-                return resp
-
-#                return self.SendResponse(ActionError("Error, GET not supported"))
+                return self.BuildResponse(ActionError("Error, GET not supported"))
 
             def post(self):
-                json = None
+                port = request.environ.get('REMOTE_PORT')
+                json = self.GetJsonRequest(request)
+                log.Dbg("Incoming request :: "                              + \
+                        "type=" + ("JSON" if request.is_json else "DATA")   + \
+                        ", port=" + str(port)                               + \
+                        ", status=" + "ok" if json else "not-ok")
+                return self.BuildResponse(RunAction(json, False))
+
+            def put(self):
+                return self.BuildResponse(ActionError("Error, PUT not supported"))
+
+            def delete(self):
+                return self.BuildResponse(ActionError("Error, DELETE not supported"))
+
+            def GetJsonRequest(self, request):
                 if request.is_json:
                     json = request.get_json()
-                    log.Dbg("Incoming JSON request")
                 else:
-                    json_str = None
                     d = request.get_data(as_text=True)
                     if d and len(d) >= 4 and d[0] == d[1] == '{' and d[-1] == d[-2] == '}':
                         json_str = d[1:-1]
+                    else:
+                        json_str = None
 
                     json = Utils.StrToJson(json_str) if json_str else None
-                    log.Dbg("Incoming JSON-HACK request, status=" + "ok" if json else "not-ok")
+                return json
 
-                if not json:
-                    json = {"fuck":"off"}
-                return self.SendResponse(RunAction(json, False))
-
-            def put(self):
-                return self.SendResponse(ActionError("Error, PUT not supported"))
-
-            def delete(self):
-                return self.SendResponse(ActionError("Error, DELETE not supported"))
-
-            def SendResponse(self, action):
-                return make_response(jsonify(action.status), \
-                    200 if action.Ok() else 400)
+            def BuildResponse(self, action):
+                status = 200 if action.Ok() else 400
+                resp = make_response(jsonify(action.status), status)
+                resp.headers.add('Access-Control-Allow-Origin', '*')
+                return resp
 
         app = Flask(APP_NAME)
         api = Api(app)
 
         api.add_resource(RestApi, "/api")
-#        WSGIRequestHandler.protocol_version = "HTTP/1.1"
         app.run(debug=False, port=self.p_port)
 
 #---------------------------------------------------------------------------------------------------
