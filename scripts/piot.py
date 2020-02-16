@@ -9,7 +9,9 @@ import os
 import time
 import sys
 import socket
+import random
 import urllib.parse
+import copy
 from collections import OrderedDict
 
 #---------------------------------------------------------------------------------------------------
@@ -338,7 +340,6 @@ class ActionCmd(Cmd):
 class ActionDbCreate(ActionCmd):
     def __init__(self, name):
         self.p_name = name
-
         super(ActionDbCreate, self).__init__("db-create", 
           OrderedDict({"name":name}))
 
@@ -371,7 +372,6 @@ class ActionDbWrite(ActionCmd):
     def __init__(self, name, data):
         self.p_name = name
         self.p_data = data
-
         super(ActionDbWrite, self).__init__("db-write", 
           OrderedDict({"name":name, "data":data}))
 
@@ -401,7 +401,6 @@ class ActionDbRead(ActionCmd):
     def __init__(self, name, filter):
         self.p_name = name
         self.p_filter = filter
-
         super(ActionDbRead, self).__init__("db-read", 
           OrderedDict({"name":name, "filter":filter}))
 
@@ -433,13 +432,17 @@ class ActionDbRead(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 class ActionSensor(ActionCmd):
-    def __init__(self, name, type, params):
+    def __init__(self, name, random, type, params):
+        self.is_random = random
         super(ActionSensor, self).__init__(name, params)
+
+    def IsRandom(self):
+        return self.is_random
 
 #---------------------------------------------------------------------------------------------------
 class ActionSensorTemperature(ActionSensor):
-    def __init__(self, name, params):
-        super(ActionSensorTemperature, self).__init__(name, "temperature", params)
+    def __init__(self, name, random, params):
+        super(ActionSensorTemperature, self).__init__(name, random, "temperature", params)
 
     def BuildSensorData(self, id, value, message):
         sensor = Sensor()
@@ -456,29 +459,34 @@ class ActionSensorDs18b20(ActionSensorTemperature):
     DS18B20_PATH = "/sys/bus/w1/devices"
     DS18B20_DATA = "w1_slave"
 
-    def __init__(self, id):
+    def __init__(self, id, random):
         self.p_id = id
-        super(ActionSensorDs18b20, self).__init__("sensor-ds18b20",
+        super(ActionSensorDs18b20, self).__init__("sensor-ds18b20", random, 
           OrderedDict({"id":id}))
 
     def Run(self):
         value = -42
         msg = None
-        while True:
-            # Load kernel modules
-            if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
-                msg = "Error, failed to load sensor modules"
-                break
 
-            # Read sensor data
-            value_raw = Utils.ReadFile( \
-              self.DS18B20_PATH + "/" + str(self.p_id) + "/" + self.DS18B20_DATA)
-            if not value_raw:
-                msg = "Error, failed to read sensor value"
-                break
+        if self.IsRandom():
+            value = random.randrange(-10, 100)
 
-            value = value_raw / 1000
-            break
+        else:
+            while True:
+                # Load kernel modules
+                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
+                    msg = "Error, failed to load sensor modules"
+                    break
+
+                # Read sensor data
+                value_raw = Utils.ReadFile( \
+                  self.DS18B20_PATH + "/" + str(self.p_id) + "/" + self.DS18B20_DATA)
+                if not value_raw:
+                    msg = "Error, failed to read sensor value"
+                    break
+
+                value = value_raw / 1000
+                break
 
         # Save sensor data
         sensor = self.BuildSensorData(self.p_id, value, msg)
@@ -503,7 +511,6 @@ class ActionError(ActionCmd):
 class ActionHttpServer(ActionCmd):
     def __init__(self, port):
         self.p_port = port
-
         super(ActionHttpServer, self).__init__("http-server", 
           OrderedDict({"port":self.p_port}))
 
@@ -561,7 +568,6 @@ class ActionHttpClient(ActionCmd):
         self.p_server = server
         self.p_auth_token = auth_token
         self.p_data = data
-
         super(ActionHttpClient, self).__init__("http-client", 
             OrderedDict({"server":server, "auth_token":auth_token, "data":data}))
 
@@ -589,6 +595,44 @@ class ActionHttpClient(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(p, dump_status=True):
+    loop_num = p.get("loop") if p else 1
+    loop_delay = p.get("loop-delay") if p else 1
+    sleep_sec = loop_delay / 1000
+    is_multi_loop = (loop_num > 1)
+    is_first = True
+
+    # Begin loop
+    if dump_status and is_multi_loop:
+        out.Write("[ ", new_line=False)
+
+    # Iterate loop
+    action = None
+    while loop_num != 0:
+        is_last = (loop_num == 1)
+        action = RunActionOnce(p, dump_status)
+
+        # Dump status
+        if dump_status:
+            prefix = "  " if is_multi_loop and is_first else ""
+            suffix = ", " if not is_last else ""
+            out.Write(prefix + Utils.JsonToStr(action.status) + suffix, do_flush=False)
+
+        # Next iteration
+        is_first = False
+        if loop_num != -1:
+            loop_num -= 1
+
+        # Bzzz-z-z-z-z-z-z-z-z-z
+        if loop_num != 0:
+            time.sleep(sleep_sec)
+
+    # End loop
+    if dump_status and is_multi_loop:
+        out.Write("]")
+    return action
+
+#---------------------------------------------------------------------------------------------------
+def RunActionOnce(p, dump_status):
     while True:
         action = None
         action_name = p.get("action") if p else None
@@ -607,7 +651,7 @@ def RunAction(p, dump_status=True):
 
         # sensor-ds18b20
         elif action_name == "sensor-ds18b20":
-            action = ActionSensorDs18b20(p.get("sensor-id"))
+            action = ActionSensorDs18b20(p.get("sensor-id"), p.get("random"))
 
         # http-server
         elif action_name == "http-server":
@@ -637,15 +681,25 @@ def RunAction(p, dump_status=True):
             p["data"] = OrderedDict({"action":"db-read", "db-name":p.get("db-name"), "filter": p.get("filter")})
             action = RunAction(p, False)
 
+        # write-sensor-ds18b20
+        elif action_name == "write-sensor-ds18b20":
+            pp = copy.deepcopy(p)
+            pp["loop"] = 1
+
+            # Run HTTP client
+            pp["action"] = "sensor-ds18b20"
+            action = RunAction(pp, False)
+            if not action.Ok():
+                break
+
+            pp["action"] = "db-write"
+            pp["data"] = OrderedDict({"db-name":pp.get("db-name"), "data": action.OutJson()})
+            action = RunAction(pp, False)
+
         # error
         else: 
             action = ActionError("Error, unknown action", p)
         break
-
-    # Dump status to stdout
-    if dump_status:
-        out.Write(Utils.JsonToStr(action.status), do_flush=False)
-
     return action
 
 #---------------------------------------------------------------------------------------------------
@@ -671,6 +725,12 @@ if __name__ == "__main__":
         help='Adress of the server (e.g. http://localhost:8888)')
     parser.add_argument('--port', action='store', type=int, default=8888, 
         help='Listening port of the server')
+    parser.add_argument('--random', action='store_true', 
+        help='Sensor will report random data insted of reading real values')
+    parser.add_argument('--loop', action='store', type=int, default=1, 
+        help='Number of loop iterations')
+    parser.add_argument('--loop-delay', action='store', type=int, default=0, 
+        help='Number of msec to sleep between loop iterations')
     args = parser.parse_args()
 
     # Log writer
@@ -686,4 +746,4 @@ if __name__ == "__main__":
     for key, value in vars(args).items():
         args_dict[key.replace("_", "-")] = value
     action = RunAction(args_dict)
-    sys.exit(action.Rc())
+    sys.exit(action.Rc() if action else 0)
