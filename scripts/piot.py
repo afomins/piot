@@ -20,6 +20,7 @@ CONF_FILE = os.environ['HOME'] + "/." + APP_NAME + ".conf"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
+GLOBAL_ARGS = None
 
 #---------------------------------------------------------------------------------------------------
 class Sensor(OrderedDict):
@@ -28,17 +29,17 @@ class Sensor(OrderedDict):
         self.Header()
 
     def Header(self):
-        if "sensor-header" not in self:
-            self["sensor-header"] = OrderedDict({               \
-                "hostname"      : Utils.GetHostname(),          \
-                "uptime"        : Utils.GetUptime(),            \
-                "timestamp"     : Utils.GetTimestamp()})
-        return self["sensor-header"]
+        if "sens-h" not in self:
+            self["sens-h"] = OrderedDict({              \
+                "host"      : Utils.GetHostname(),      \
+                "up"        : Utils.GetUptime(),        \
+                "ts"        : Utils.GetTimestamp()})
+        return self["sens-h"]
 
     def Data(self):
-        if "sensor-data" not in self:
-            self["sensor-data"] = OrderedDict()
-        return self["sensor-data"]
+        if "sens-d" not in self:
+            self["sens-d"] = OrderedDict()
+        return self["sens-d"]
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -386,12 +387,12 @@ class ActionDbWrite(ActionCmd):
 
         # Build header
         timestamp = str(Utils.GetTimestamp())
-        header = "{\"timestamp\":" + timestamp + "}"
+        header = "{\"ts\":" + timestamp + "}"
 
         # Write current file
-        cmd = "echo '" + prefix + "{ "                              + \
-                    "\"db-header\":" + header + ","                 + \
-                    "\"db-data\":" + Utils.JsonToStr(self.p_data)   + \
+        cmd = "echo '" + prefix + "{ "                          + \
+                    "\"db-h\":" + header + ","                   + \
+                    "\"db-d\":" + Utils.JsonToStr(self.p_data)   + \
                "}' >> " + db_file
         if not ShellCmd(cmd).Ok():
             return self.SetErr("Error, failed to write data")
@@ -447,9 +448,9 @@ class ActionSensorTemperature(ActionSensor):
     def BuildSensorData(self, id, value, message):
         sensor = Sensor()
         d = sensor.Data()
-        d["type"] = "temperature"
+        d["type"] = "temp"
         d["id"] = id
-        d["value"] = value
+        d["val"] = value
         if message:
             d["message"] = message
         return sensor
@@ -529,7 +530,10 @@ class ActionHttpServer(ActionCmd):
                         "type=" + ("JSON" if request.is_json else "DATA")   + \
                         ", port=" + str(port)                               + \
                         ", status=" + "ok" if json else "not-ok")
-                return self.BuildResponse(RunAction(json, False))
+
+                # Apply default arguments
+                p = {**GLOBAL_ARGS, **json}
+                return self.BuildResponse(RunAction(p, False))
 
             def put(self):
                 return self.BuildResponse(ActionError("Error, PUT not supported"))
@@ -595,21 +599,26 @@ class ActionHttpClient(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(p, dump_status=True):
+    # Read loop param
     loop_num = p.get("loop") if p else 1
-    loop_delay = p.get("loop-delay") if p else 1
-    sleep_sec = loop_delay / 1000
+    loop_delay = p.get("loop-delay") if p else 0
+    loop_sleep_sec = loop_delay / 1000
     is_multi_loop = (loop_num > 1)
-    is_first = True
+
+    # Loop is allowed only once - all following RunAction() invocations 
+    # should not have loop
+    p["loop"] = 1
 
     # Begin loop
     if dump_status and is_multi_loop:
-        out.Write("[ ", new_line=False)
+        out.Write("[", new_line=False)
 
     # Iterate loop
+    is_first = True
     action = None
     while loop_num != 0:
         is_last = (loop_num == 1)
-        action = RunActionOnce(p, dump_status)
+        action = RunActionOnce(copy.deepcopy(p))
 
         # Dump status
         if dump_status:
@@ -623,8 +632,8 @@ def RunAction(p, dump_status=True):
             loop_num -= 1
 
         # Bzzz-z-z-z-z-z-z-z-z-z
-        if loop_num != 0:
-            time.sleep(sleep_sec)
+        if loop_num != 0 and loop_sleep_sec > 0:
+            time.sleep(loop_sleep_sec)
 
     # End loop
     if dump_status and is_multi_loop:
@@ -632,9 +641,8 @@ def RunAction(p, dump_status=True):
     return action
 
 #---------------------------------------------------------------------------------------------------
-def RunActionOnce(p, dump_status):
+def RunActionOnce(p):
     while True:
-        action = None
         action_name = p.get("action") if p else None
 
         # db-create
@@ -683,18 +691,16 @@ def RunActionOnce(p, dump_status):
 
         # write-sensor-ds18b20
         elif action_name == "write-sensor-ds18b20":
-            pp = copy.deepcopy(p)
-            pp["loop"] = 1
-
-            # Run HTTP client
-            pp["action"] = "sensor-ds18b20"
-            action = RunAction(pp, False)
+            # Read sensor
+            p["action"] = "sensor-ds18b20"
+            action = RunAction(p, False)
             if not action.Ok():
                 break
 
-            pp["action"] = "db-write"
-            pp["data"] = OrderedDict({"db-name":pp.get("db-name"), "data": action.OutJson()})
-            action = RunAction(pp, False)
+            # Write sensor
+            p["data"] = action.OutJson()
+            p["action"] = "db-write"
+            action = RunAction(p, False)
 
         # error
         else: 
@@ -742,8 +748,8 @@ if __name__ == "__main__":
     out = Writer(sys.stdout)
 
     # Run action
-    args_dict = {}
+    GLOBAL_ARGS = {}
     for key, value in vars(args).items():
-        args_dict[key.replace("_", "-")] = value
-    action = RunAction(args_dict)
+        GLOBAL_ARGS[key.replace("_", "-")] = value
+    action = RunAction(GLOBAL_ARGS, True)
     sys.exit(action.Rc() if action else 0)
