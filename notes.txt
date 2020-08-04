@@ -1,0 +1,22 @@
+Create docker container:
+    sudo docker run -d \
+     -p 3000:3000 \
+     --net="host" \
+     --name=grafana \
+     -e "GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource" \
+     grafana/grafana:latest-ubuntu
+    sudo docker start grafana
+    sudo docker stop grafana
+
+Run shell in container:
+    sudo docker exec -it grafana bash
+
+Update grafana password:
+    sudo docker exec -it grafana grafana-cli admin reset-admin-password xxx
+
+Start piot server:
+    ~/git/piot/scripts/piot.py --action=http-server --addr=localhost --port=8000
+
+Read piot server:
+    ~/git/piot/scripts/piot.py --action=http-client-db-read --addr=localhost --db-name=test --auth-token=aaa --filter=.[0:4]| jq
+

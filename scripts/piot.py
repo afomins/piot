@@ -7,6 +7,7 @@ import logging
 import json
 import os
 import time
+import datetime
 import sys
 import socket
 import random
@@ -70,8 +71,11 @@ class Status(OrderedDict):
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
-    def GetTimestamp():
+    def GetUnixTimestamp():
         return int(time.time())
+
+    def GetTimestamp():
+        return time.time()
 
     def GetTimeStr(fmt = "%Y/%m/%d-%H:%M:%S"):
         return time.strftime(fmt, time.gmtime())
@@ -130,6 +134,11 @@ class Utils:
         with open('/proc/uptime', 'r') as f:
             sec = float(f.readline().split()[0])
         return int(sec)
+
+    def StringToTimestamp(string):
+        # Grafana sends timetamp in following format - 2020-08-04T10:34:33.983Z
+        tc = datetime.datetime.strptime(string, "%Y-%m-%dT%H:%M:%S.%fZ")
+        log.Dbg(str(tc))
 
 #---------------------------------------------------------------------------------------------------
 class Writer:
@@ -509,29 +518,38 @@ class ActionError(ActionCmd):
         self.SetErr(self.p_msg)
 
 #---------------------------------------------------------------------------------------------------
+class ActionOk(ActionCmd):
+    def __init__(self, msg, args = None):
+        self.p_msg = msg
+        self.p_args = args
+        super(ActionOk, self).__init__("ok", {})
+
+    def Run(self):
+        if self.p_args:
+            self.SetOut(self.p_args)
+
+#---------------------------------------------------------------------------------------------------
 class ActionHttpServer(ActionCmd):
-    def __init__(self, port):
+    def __init__(self, addr, port):
+        self.p_addr = addr
         self.p_port = port
         super(ActionHttpServer, self).__init__("http-server", 
-          OrderedDict({"port":self.p_port}))
+          OrderedDict({"addr":self.p_addr, "port":self.p_port}))
 
     def Run(self):
         from flask import Flask, jsonify, make_response
         from flask_restful import Api, Resource, request
 
+        #-------------------------------------------------------------------------------------------
         class RestApi(Resource):
             def get(self):
+                self.PrepateRequest()
                 return self.BuildResponse(ActionError("Error, GET not supported"))
 
             def post(self):
-                port = request.environ.get('REMOTE_PORT')
-                json = self.GetJsonRequest(request)
-                log.Dbg("Incoming request :: "                              + \
-                        "type=" + ("JSON" if request.is_json else "DATA")   + \
-                        ", port=" + str(port)                               + \
-                        ", status=" + "ok" if json else "not-ok")
+                json = self.PrepateRequest()
 
-                # Apply default arguments
+                # Merge incoming arguments with default arguments
                 p = {**GLOBAL_ARGS, **json}
                 return self.BuildResponse(RunAction(p, False))
 
@@ -540,6 +558,18 @@ class ActionHttpServer(ActionCmd):
 
             def delete(self):
                 return self.BuildResponse(ActionError("Error, DELETE not supported"))
+
+            def PrepateRequest(self):
+                log.Dbg("aaa")
+                port = request.environ.get('REMOTE_PORT')
+                json = self.GetJsonRequest(request)
+                log.Dbg("json = " + str(json))
+                log.Dbg("Incoming request :: "                              + \
+                        "type=" + ("JSON" if request.is_json else "DATA")   + \
+                        ", port=" + str(port)                               + \
+                        ", status=" + "ok" if json else "not-ok")
+                log.Dbg("bbb")
+                return json
 
             def GetJsonRequest(self, request):
                 if request.is_json:
@@ -560,25 +590,46 @@ class ActionHttpServer(ActionCmd):
                 resp.headers.add('Access-Control-Allow-Origin', '*')
                 return resp
 
+        #-------------------------------------------------------------------------------------------
+        class GrafanaDs(RestApi):
+            def get(self):
+                return self.BuildResponse(ActionOk("ok"))
+
+        #-------------------------------------------------------------------------------------------
+        class GrafanaDsQuery(RestApi):
+            def post(self):
+                json = self.PrepateRequest()
+                return self.BuildResponse(ActionError("Error, POST not supported"))
+
+            def put(self):
+                return self.BuildResponse(ActionError("Error, PUT not supported"))
+
+            def delete(self):
+                return self.BuildResponse(ActionError("Error, DELETE not supported"))
+
         app = Flask(APP_NAME)
         api = Api(app)
-
         api.add_resource(RestApi, "/api")
-        app.run(debug=False, port=self.p_port)
+        api.add_resource(GrafanaDs, "/ds")
+        api.add_resource(GrafanaDsQuery, "/ds/query")
+        app.run(debug=False, host=self.p_addr, port=self.p_port)
 
 #---------------------------------------------------------------------------------------------------
 class ActionHttpClient(ActionCmd):
-    def __init__(self, server, auth_token, data):
-        self.p_server = server
+    def __init__(self, proto, addr, port, auth_token, data):
+        self.p_proto = proto
+        self.p_addr = addr
+        self.p_port = port
         self.p_auth_token = auth_token
         self.p_data = data
         super(ActionHttpClient, self).__init__("http-client", 
-            OrderedDict({"server":server, "auth_token":auth_token, "data":data}))
+            OrderedDict({"proto":proto, "addr":addr, "port":port, "auth_token":auth_token, "data":data}))
 
     def Run(self):
         # Upload data to server
+        url_str = self.p_proto + "://" + self.p_addr + ":" + str(self.p_port)
         data_str = Utils.JsonToStr(self.p_data)
-        cmd_str = "curl -X POST -s " + self.p_server + "/api"           + \
+        cmd_str = "curl -X POST -s " + url_str + "/api"                 + \
                               " -H \"Content-Type: application/json\""  + \
                               " -d '" +  data_str + "'"
         cmd = ShellCmd(cmd_str)
@@ -663,11 +714,13 @@ def RunActionOnce(p):
 
         # http-server
         elif action_name == "http-server":
-            action = ActionHttpServer(p.get("port"))
+            action = ActionHttpServer(p.get("addr"), p.get("port"))
 
         # http-client
         elif action_name == "http-client":
-            action = ActionHttpClient(p.get("server"), p.get("auth-token"), p.get("data"))
+            action = ActionHttpClient(p.get("proto"), p.get("addr"), 
+                                      p.get("port"), p.get("auth-token"), 
+                                      p.get("data"))
 
         # http-client-sensor-ds18b20
         elif action_name == "http-client-sensor-ds18b20":
@@ -678,15 +731,25 @@ def RunActionOnce(p):
                 break
 
             # Run HTTP client
-            remote_action = OrderedDict({"action":"db-write", "db-name":p.get("db-name"), "data": action.OutJson()})
-            p = OrderedDict({"action":"http-client", "server":p.get("server"), "auth-token":p.get("auth-token"), "data": remote_action})
+            remote_action = OrderedDict({
+                "action":"db-write", 
+                "db-name":p.get("db-name"), 
+                "data": action.OutJson()})
+            p = OrderedDict({
+                "action":"http-client", 
+                "addr":p.get("addr"), 
+                "auth-token":p.get("auth-token"), 
+                "data": remote_action})
             action = RunAction(p, False)
 
         # http-client-db-read
         elif action_name == "http-client-db-read":
             # Run HTTP client
             p["action"] = "http-client"
-            p["data"] = OrderedDict({"action":"db-read", "db-name":p.get("db-name"), "filter": p.get("filter")})
+            p["data"] = OrderedDict({
+                "action":"db-read", 
+                "db-name":p.get("db-name"), 
+                "filter": p.get("filter")})
             action = RunAction(p, False)
 
         # write-sensor-ds18b20
@@ -727,9 +790,11 @@ if __name__ == "__main__":
         help='JQ filter that will be applied on top of JSON output')
     parser.add_argument('--auth-token', action='store', 
         help='Authentication token when connecting to server')
-    parser.add_argument('--server', action='store', 
-        help='Adress of the server (e.g. http://localhost:8888)')
-    parser.add_argument('--port', action='store', type=int, default=8888, 
+    parser.add_argument('--proto', action='store', default="http", 
+        help='Transport ptotocol (HTTP or HTTPS)')
+    parser.add_argument('--addr', action='store', 
+        help='Adress of the server')
+    parser.add_argument('--port', action='store', type=int, default=8000, 
         help='Listening port of the server')
     parser.add_argument('--random', action='store_true', 
         help='Sensor will report random data insted of reading real values')
@@ -743,6 +808,8 @@ if __name__ == "__main__":
     log = Logger("stdout" if args.action == "http-server" else LOG_FILE)
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
+
+    Utils.StringToTimestamp("2020-08-04T16:34:33.984Z")
 
     # Stdout writer
     out = Writer(sys.stdout)
