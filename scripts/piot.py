@@ -13,6 +13,7 @@ import socket
 import random
 import urllib.parse
 import copy
+import re
 from collections import OrderedDict
 
 #---------------------------------------------------------------------------------------------------
@@ -22,6 +23,13 @@ LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
 GLOBAL_ARGS = None
+SECS = {    "s" : 1, 
+            "m" : 60, 
+            "h" : 60 * 60,
+            "d" : 60 * 60 * 24,
+            "w" : 60 * 60 * 24 * 7,
+            "M" : None,
+            "Y" : None}
 
 #---------------------------------------------------------------------------------------------------
 class Sensor(OrderedDict):
@@ -71,14 +79,114 @@ class Status(OrderedDict):
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
+    def StrToInt(str):
+        val = 0
+        try:
+            val = int(str)
+        except:
+            pass
+        return val
+
     def GetUnixTimestamp():
         return int(time.time())
 
     def GetTimestamp():
         return time.time()
 
-    def GetTimeStr(fmt = "%Y/%m/%d-%H:%M:%S"):
-        return time.strftime(fmt, time.gmtime())
+    def GetTimestampFromString(val, fmt = "%Y-%m-%dT%H:%M:%S.%fZ"):
+        try:
+            dt = datetime.datetime.strptime(val, fmt)
+            ts = datetime.datetime.timestamp(dt)
+            return ts
+        except:
+            return None
+
+    def GetTimestampFromTimedef(timedef, now_ts = None):
+        #0 - base
+        #1 - offset
+        #2 - offset direction
+        #3 - offset value
+        #4 - offset unit
+        #6 - full period
+        #7 - full period unit
+        p = "(\w+)"                 + \
+            "("                     + \
+                 "(\+|\-)"          + \
+                 "([0-9]+)"         + \
+                 "(s|m|h|d|w|M|y)"  + \
+            ")?"                    + \
+            "("                     + \
+                 "\/"               + \
+                 "(s|m|h|d|w|M|y)"  + \
+            ")?"
+
+        # Get current time
+        dt = datetime.datetime.now() if now_ts == None \
+            else datetime.datetime.fromtimestamp(now_ts)
+
+        # Go!
+        ts = None
+        err = None
+        match = re.fullmatch(p, timedef)
+        while True:
+            if not match:
+                err = "no match"; break
+
+            groups = match.groups()
+            if len(groups) != 7:
+                err = "wrong groups" ; break
+
+            # Base
+            base = groups[0]
+            if base != "now":
+                err = "bad base" ; break
+
+            # Offset
+            if groups[1]:
+                # Direction
+                off_dir = +1 if groups[2] == "+" else -1
+
+                # Value
+                off_value = Utils.StrToInt(groups[3])
+
+                # Unit
+                off_unit = groups[4]
+                if off_unit not in SECS:
+                    err = "bad unit" ; break
+
+                # Process time offset that is expressed in seconds (s|m|h|d|w)
+                secs = SECS[off_unit]
+                if secs:
+                    delta = datetime.timedelta(seconds = off_value * secs)
+                    if off_dir > 0:
+                        dt = dt + delta
+                    else:
+                        dt = dt - delta
+
+                # Process variable size time offset (M|y)
+                else:
+                    if off_unit == "M":
+                        dt = dt.replace(                                    \
+                            year = dt.year + off_dir * int(off_value / 12), \
+                            month = dt.month + off_dir * (off_value % 12))
+
+                    elif off_unit == "y":
+                        dt = dt.replace(                                    \
+                            year = dt.year + off_dir * value)
+
+                    else:
+                        dt = None
+
+            # Convert datetime to timestamp
+            if dt:
+                ts = datetime.datetime.timestamp(dt)
+
+            # End loop
+            break
+
+        if err:
+            log.Err("Timedef parsing failed, " + err + " :: val=" + timedef)
+        return ts
 
     def IsDirPresent(path):
         return os.path.isdir(path)
@@ -134,11 +242,6 @@ class Utils:
         with open('/proc/uptime', 'r') as f:
             sec = float(f.readline().split()[0])
         return int(sec)
-
-    def StringToTimestamp(string):
-        # Grafana sends timetamp in following format - 2020-08-04T10:34:33.983Z
-        tc = datetime.datetime.strptime(string, "%Y-%m-%dT%H:%M:%S.%fZ")
-        log.Dbg(str(tc))
 
 #---------------------------------------------------------------------------------------------------
 class Writer:
@@ -788,6 +891,14 @@ if __name__ == "__main__":
         help='Data in JSON format')
     parser.add_argument('--filter', action='store', default=".", 
         help='JQ filter that will be applied on top of JSON output')
+    parser.add_argument('--range-from', action='store', default="now-6d", 
+        help='Beginning of time range')
+    parser.add_argument('--range-to', action='store', default="now", 
+        help='End of time range')
+    parser.add_argument('--range-interval', action='store', type=int, default=1000, 
+        help='Minimal interval duration in range measured in ms')
+    parser.add_argument('--range-size', action='store', type=int, default=1024, 
+        help='Maximum number of entries in range')
     parser.add_argument('--auth-token', action='store', 
         help='Authentication token when connecting to server')
     parser.add_argument('--proto', action='store', default="http", 
@@ -809,7 +920,11 @@ if __name__ == "__main__":
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
 
-    Utils.StringToTimestamp("2020-08-04T16:34:33.984Z")
+    Utils.GetTimestampFromString("2020-08-04T16:34:33.984Z")
+
+    ts = Utils.GetUnixTimestamp()
+    for timedef in ("now-5m", "now", "now/d", "now/w", "now/w", "now-6M", "now-1M/M", "fuck-1x"):
+        Utils.GetTimestampFromTimedef(timedef, ts)
 
     # Stdout writer
     out = Writer(sys.stdout)
