@@ -23,13 +23,13 @@ LOG_FILE = "/tmp/" + APP_NAME + ".log"
 TMP_FILE = "/tmp/" + APP_NAME + "." + str(os.getpid()) + ".tmp"
 DB_CURRENT = "dev-current.json"
 GLOBAL_ARGS = None
-SECS = {    "s" : 1, 
+SECONDS = { "s" : 1, 
             "m" : 60, 
             "h" : 60 * 60,
             "d" : 60 * 60 * 24,
             "w" : 60 * 60 * 24 * 7,
             "M" : None,
-            "Y" : None}
+            "y" : None}
 
 #---------------------------------------------------------------------------------------------------
 class Sensor(OrderedDict):
@@ -101,6 +101,12 @@ class Utils:
         except:
             return None
 
+    def GetStringFromTimestamp(val, fmt = "%Y-%m-%dT%H:%M:%S.%fZ"):
+        try:
+            return datetime.datetime.fromtimestamp(val).strftime(fmt)
+        except:
+            return "error"
+
     def GetTimestampFromTimedef(timedef, now_ts = None):
         #0 - base
         #1 - offset
@@ -144,24 +150,23 @@ class Utils:
             # Offset
             if groups[1]:
                 # Direction
-                off_dir = +1 if groups[2] == "+" else -1
+                off_dir = +1 if groups[2] == "+" \
+                    else -1
 
                 # Value
                 off_value = Utils.StrToInt(groups[3])
 
                 # Unit
                 off_unit = groups[4]
-                if off_unit not in SECS:
+                if off_unit not in SECONDS:
                     err = "bad unit" ; break
 
                 # Process time offset that is expressed in seconds (s|m|h|d|w)
-                secs = SECS[off_unit]
+                secs = SECONDS[off_unit]
                 if secs:
                     delta = datetime.timedelta(seconds = off_value * secs)
-                    if off_dir > 0:
-                        dt = dt + delta
-                    else:
-                        dt = dt - delta
+                    dt = dt + delta if (off_dir > 0) \
+                        else dt - delta
 
                 # Process variable size time offset (M|y)
                 else:
@@ -172,7 +177,7 @@ class Utils:
 
                     elif off_unit == "y":
                         dt = dt.replace(                                    \
-                            year = dt.year + off_dir * value)
+                            year = dt.year + off_dir * off_value)
 
                     else:
                         dt = None
@@ -920,11 +925,14 @@ if __name__ == "__main__":
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
 
-    Utils.GetTimestampFromString("2020-08-04T16:34:33.984Z")
-
     ts = Utils.GetUnixTimestamp()
-    for timedef in ("now-5m", "now", "now/d", "now/w", "now/w", "now-6M", "now-1M/M", "fuck-1x"):
-        Utils.GetTimestampFromTimedef(timedef, ts)
+    for timedef in ("now-5m", "now", "now/d", "now+7w", "now/w", "now-6M", "now-1M/M", "fuck-1x", "now+5y"):
+        ts_new = Utils.GetTimestampFromTimedef(timedef, ts)
+        log.Dbg("def=" + timedef + \
+                " now=" + str(ts) + \
+                " new=" + str(ts_new) + \
+                " diff=" + str((ts_new if ts_new else 0) - ts) + \
+                " dt=" + Utils.GetStringFromTimestamp(ts_new))
 
     # Stdout writer
     out = Writer(sys.stdout)
