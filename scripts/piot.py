@@ -32,6 +32,22 @@ SECONDS = { "s" : 1,
             "y" : None}
 
 #---------------------------------------------------------------------------------------------------
+class FakeRange():
+    def __init__(self, p):
+        self.r_from = Utils.GetTimestampFromTimedef(p.get("range-from"))
+        self.r_to = Utils.GetTimestampFromTimedef(p.get("range-to"))
+        self.r_interval = p.get("range-interval")
+        self.r_size = p.get("range-size")
+        self.idx = 0
+
+    def Next(self):
+        if self.idx >= self.r_size:
+            return None
+
+        self.idx += 1
+        return self.r_from + (self.idx - 1) * self.r_interval
+
+#---------------------------------------------------------------------------------------------------
 class Sensor(OrderedDict):
     def __init__(self):
         super(Sensor, self).__init__()
@@ -487,11 +503,12 @@ class ActionDbCreate(ActionCmd):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbWrite(ActionCmd):
-    def __init__(self, name, data):
+    def __init__(self, name, data, random):
         self.p_name = name
         self.p_data = data
+        self.p_random = random
         super(ActionDbWrite, self).__init__("db-write", 
-          OrderedDict({"name":name, "data":data}))
+          OrderedDict({"name":name, "data":data, "random":random}))
 
     def Run(self):
         # Get DB files
@@ -503,7 +520,8 @@ class ActionDbWrite(ActionCmd):
         prefix = "  " if Utils.IsFileEmpty(db_file) else ", "
 
         # Build header
-        timestamp = str(Utils.GetTimestamp())
+        timestamp = str(fake_range.Next()) if fake_range \
+            else str(Utils.GetTimestamp())
         header = "{\"ts\":" + timestamp + "}"
 
         # Write current file
@@ -810,7 +828,7 @@ def RunActionOnce(p):
 
         # db-write
         elif action_name == "db-write":
-            action = ActionDbWrite(p.get("db-name"), p.get("data"))
+            action = ActionDbWrite(p.get("db-name"), p.get("data"), p.get("random"))
 
         # db-read
         elif action_name == "db-read": 
@@ -925,21 +943,26 @@ if __name__ == "__main__":
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
 
-    ts = Utils.GetUnixTimestamp()
-    for timedef in ("now-5m", "now", "now/d", "now+7w", "now/w", "now-6M", "now-1M/M", "fuck-1x", "now+5y"):
-        ts_new = Utils.GetTimestampFromTimedef(timedef, ts)
-        log.Dbg("def=" + timedef + \
-                " now=" + str(ts) + \
-                " new=" + str(ts_new) + \
-                " diff=" + str((ts_new if ts_new else 0) - ts) + \
-                " dt=" + Utils.GetStringFromTimestamp(ts_new))
+#    ts = Utils.GetUnixTimestamp()
+#    for timedef in ("now-5m", "now", "now/d", "now+7w", "now/w", "now-6M", "now-1M/M", "fuck-1x", "now+5y"):
+#        ts_new = Utils.GetTimestampFromTimedef(timedef, ts)
+#        log.Dbg("def=" + timedef + \
+#                " now=" + str(ts) + \
+#                " new=" + str(ts_new) + \
+#                " diff=" + str((ts_new if ts_new else 0) - ts) + \
+#                " dt=" + Utils.GetStringFromTimestamp(ts_new))
 
     # Stdout writer
     out = Writer(sys.stdout)
 
-    # Run action
+    # Build list arguments
     GLOBAL_ARGS = {}
     for key, value in vars(args).items():
         GLOBAL_ARGS[key.replace("_", "-")] = value
+
+    # Fake range
+    fake_range = FakeRange(GLOBAL_ARGS) if args.ranfom else None
+
+    # Run action
     action = RunAction(GLOBAL_ARGS, True)
     sys.exit(action.Rc() if action else 0)

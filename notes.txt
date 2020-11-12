@@ -20,3 +20,4 @@ Start piot server:
 Read piot server:
     ~/git/piot/scripts/piot.py --action=http-client-db-read --addr=localhost --db-name=test --auth-token=aaa --filter=.[0:4]| jq
 
+    
