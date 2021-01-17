@@ -54,17 +54,17 @@ class Sensor(OrderedDict):
         self.Header()
 
     def Header(self):
-        if "sens-h" not in self:
-            self["sens-h"] = OrderedDict({              \
+        if "sens_h" not in self:
+            self["sens_h"] = OrderedDict({              \
                 "host"      : Utils.GetHostname(),      \
                 "up"        : Utils.GetUptime(),        \
                 "ts"        : Utils.GetTimestamp()})
-        return self["sens-h"]
+        return self["sens_h"]
 
     def Data(self):
-        if "sens-d" not in self:
-            self["sens-d"] = OrderedDict()
-        return self["sens-d"]
+        if "sens_d" not in self:
+            self["sens_d"] = OrderedDict()
+        return self["sens_d"]
 
 #---------------------------------------------------------------------------------------------------
 class Status(OrderedDict):
@@ -446,8 +446,9 @@ class ActionCmd(Cmd):
             v_str = str(v)
             self.status.SetParam(k, v_str)
 
-            if not v:
+            if v == None:
                 is_ok = False
+                break
 
         # Fail if mandatory parameters are missing
         if not is_ok:
@@ -525,9 +526,9 @@ class ActionDbWrite(ActionCmd):
         header = "{\"ts\":" + timestamp + "}"
 
         # Write current file
-        cmd = "echo '" + prefix + "{ "                          + \
-                    "\"db-h\":" + header + ","                   + \
-                    "\"db-d\":" + Utils.JsonToStr(self.p_data)   + \
+        cmd = "echo '" + prefix + "{ "                           + \
+                    "\"db_h\":" + header + ","                   + \
+                    "\"db_d\":" + Utils.JsonToStr(self.p_data)   + \
                "}' >> " + db_file
         if not ShellCmd(cmd).Ok():
             return self.SetErr("Error, failed to write data")
@@ -736,7 +737,7 @@ class ActionHttpServer(ActionCmd):
         app = Flask(APP_NAME)
         api = Api(app)
         api.add_resource(RestApi, "/api")
-        api.add_resource(GrafanaDs, "/ds")
+        api.add_resource(GrafanaDs, "/")
         api.add_resource(GrafanaDsQuery, "/ds/query")
         app.run(debug=False, host=self.p_addr, port=self.p_port)
 
@@ -931,7 +932,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', action='store', type=int, default=8000, 
         help='Listening port of the server')
     parser.add_argument('--random', action='store_true', 
-        help='Sensor will report random data insted of reading real values')
+        help='Sensor will report random data instead of reading real values')
     parser.add_argument('--loop', action='store', type=int, default=1, 
         help='Number of loop iterations')
     parser.add_argument('--loop-delay', action='store', type=int, default=0, 
@@ -961,7 +962,7 @@ if __name__ == "__main__":
         GLOBAL_ARGS[key.replace("_", "-")] = value
 
     # Fake range
-    fake_range = FakeRange(GLOBAL_ARGS) if args.ranfom else None
+    fake_range = FakeRange(GLOBAL_ARGS) if args.random else None
 
     # Run action
     action = RunAction(GLOBAL_ARGS, True)
