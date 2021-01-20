@@ -178,8 +178,18 @@ class Utils:
             pass
         return body
 
-    def AppendFile(path, body):
-        with open(path, "a") as f:
+    def ReadFileLines(path):
+        body = []
+        try:
+            f = open(path, "r")
+            if f and f.mode == "r":
+                body = f.readlines()
+        except:
+            pass
+        return body
+
+    def WriteFile(path, body, clear_file):
+        with open(path, "w" if clear_file else "a") as f:
             f.write(body)
 
     def JsonToStr(json_obj):
@@ -243,8 +253,83 @@ class Logger(Writer):
         self.Log("ERR", line, tab_num)
 
 #---------------------------------------------------------------------------------------------------
-class CmdResult:
-    def __init__(self):
+class LogTab:
+    def __init__(self, log_tab):
+        self._log_tab = log_tab
+
+    def Log(self, prefix, line):
+        log.Log(prefix, line, self._log_tab)
+
+    def LogDbg(self, line):
+        log.Dbg(line, self._log_tab)
+
+    def LogInf(self, line):
+        log.Inf(line, self._log_tab)
+
+    def LogErr(self, line):
+        log.Err(line, self._log_tab)
+
+    def NextLogTab(self):
+        return self._log_tab + 1
+
+#---------------------------------------------------------------------------------------------------
+class Backlog(LogTab):
+    BACKLOG_DIR = "backlog"
+    DATA_EXTENSION = ".piot2"
+    META_EXTENSION = ".piot2.ext"
+
+    def __init__(self, name, log_tab):
+        super(Backlog, self).__init__(log_tab)
+        self._name = name
+        self._data_path = BACKLOG_DIR + "/" + name + BACKLOG_EXTENSION
+        self._meta_path = BACKLOG_DIR + "/" + name + META_EXTENSION
+        self._meta = self.ReadMeta()
+
+    def Write(self, data):
+        pass
+
+    def WriteMeta(self, time_first, time_last):
+        data = OrderedDict({"time-first" : time_first, "time-last":time_last})
+        Utils.WriteFile(self._meta_path, Utils.JsonToStr(data), True)
+
+    def ReadMeta(self):
+        data = None
+        while True:
+            # Read meta file
+            body = Utils.ReadFile(self._meta_path)
+            if not body:
+                self.LogDbg("Failed to read backlog meta :: file=" + self._meta_path)
+                break
+
+            # Parse meta file
+            data = Utils.StrToJson(body)
+            if not data:
+                self.LogErr("Failed to parse backlog meta :: file=" + self._meta_path)
+                break
+
+            # Read meta entries
+            time_first = 0
+            time_last = 0
+            try:
+                time_first = int(data["time-first"])
+                time_last = int(data["time-last"])
+            except:
+                self.LogErr("Failed to read backlog meta entries :: file=" + self._meta_path)
+                break
+
+            # Validate meta file
+            if time_last < time_first:
+                self.LogDbg("Failed to validate backlog meta entries :: file=" + self._meta_path)
+                data = None
+                break
+
+            break
+        return data
+
+#---------------------------------------------------------------------------------------------------
+class CmdResult(LogTab):
+    def __init__(self, log_tab):
+        super(CmdResult, self).__init__(log_tab)
         self._is_json = False
         self._out = ""
         self._err = ""
@@ -281,10 +366,9 @@ class CmdResult:
 
 #---------------------------------------------------------------------------------------------------
 class Cmd(CmdResult):
-    def __init__(self, cmd, log_tab_num):
-        super(Cmd, self).__init__()
+    def __init__(self, cmd, log_tab):
+        super(Cmd, self).__init__(log_tab)
         self._cmd = cmd
-        self._log_tab_num = log_tab_num
 
         # Prepare command 
         self.Prepare()
@@ -300,10 +384,10 @@ class Cmd(CmdResult):
         self.LogDbg(">> rc  = " + str(self.Rc()))
         out_str = self.OutStr()
         if len(out_str) > 0:
-            Utils.LogLines("DBG", ">> out = ", out_str, self._log_tab_num)
+            Utils.LogLines("DBG", ">> out = ", out_str, self._log_tab)
         err_str = self.Err()
         if len(err_str) > 0:
-            Utils.LogLines("DBG", ">> err = ", err_str, self._log_tab_num)
+            Utils.LogLines("DBG", ">> err = ", err_str, self._log_tab)
 
     def Prepare(self):
         pass
@@ -313,23 +397,11 @@ class Cmd(CmdResult):
 
     def Finalize(self):
         pass
-    
-    def Log(self, prefix, line):
-        log.Log(prefix, line, self._log_tab_num)
-
-    def LogDbg(self, line):
-        log.Dbg(line, self._log_tab_num)
-
-    def LogInf(self, line):
-        log.Inf(line, self._log_tab_num)
-
-    def LogErr(self, line):
-        log.Err(line, self._log_tab_num)
 
 #---------------------------------------------------------------------------------------------------
 class ShellCmd(Cmd):
-    def __init__(self, cmd, log_tab_num):
-        super(ShellCmd, self).__init__(cmd, log_tab_num)
+    def __init__(self, cmd, log_tab):
+        super(ShellCmd, self).__init__(cmd, log_tab)
 
     def Prepare(self):
         self.LogDbg("Running shell command :: cmd=" + self._cmd)
@@ -341,12 +413,12 @@ class ShellCmd(Cmd):
 
 #---------------------------------------------------------------------------------------------------
 class Action(Cmd):
-    def __init__(self, cmd, log_tab_num, args):
+    def __init__(self, cmd, log_tab, args):
         self._args = args
         self._status = OrderedDict()
         self._status["action"] = cmd
         self._status["args"] = OrderedDict({})
-        super(Action, self).__init__(cmd, log_tab_num)
+        super(Action, self).__init__(cmd, log_tab)
 
     def Prepare(self):
         # Test mandatory arguments
@@ -390,8 +462,8 @@ class ActionError(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(Action):
-    def __init__(self, log_tab_num, auth_token):
-        super(ActionDbCreate, self).__init__("db-create", log_tab_num, 
+    def __init__(self, log_tab, auth_token):
+        super(ActionDbCreate, self).__init__("db-create", log_tab, 
           OrderedDict({"auth-token":auth_token}))
 
     def Run(self):
@@ -408,20 +480,41 @@ class ActionBacklogWrite(Action):
     def Run(self):
         while True:
             # Initialize backlog file
-            tab = self._log_tab_num + 1
-            path = "backlog/" + self._sensor_name
-            if not ShellCmd("mkdir -p backlog && touch " + path, tab).Ok():
+            path = self.GetBacklogPath(self._sensor_name)
+            if not ShellCmd("mkdir -p backlog && touch " + path, self.NextLogTab()).Ok():
                 self.SetErr("Error, failed init backlog")
                 break
 
             # Write data to backlog
             prefix = "  " if Utils.IsFileEmpty(path) else ", "
-            Utils.AppendFile(path, prefix + self._data + "\n")
+            Utils.WriteFile(path, prefix + self._data + "\n", False)
+            break
+
+#---------------------------------------------------------------------------------------------------
+class ActionBacklogRead(Action):
+    def __init__(self, sensor_name):
+        self._sensor_name = sensor_name
+        super(ActionBacklogRead, self).__init__("backlog-read", 1,
+          OrderedDict({"sensor-name":sensor_name}))
+
+    def Run(self):
+        while True:
+            # Read backlog file
+            path = self.GetBacklogPath(self._sensor_name)
+            body = Utils.ReadFile(path)
+            if not body:
+                body = ""
+
+            if not ShellCmd("" + path, self.NextLogTab()).Ok():
+                self.SetErr("Error, failed read backlog")
+                break
             break
 
         # Save sensor data
         data = OrderedDict()
-        data["path"] = os.environ['HOME'] + "/" + path
+        data["path"] = os.environ['PWD'] + "/" + path
+        data["size"] = os.environ['PWD'] + "/" + path
+        data["age"] = os.environ['PWD'] + "/" + path
         self.SetOut(data)
 
 #---------------------------------------------------------------------------------------------------
@@ -443,7 +536,8 @@ class ActionReadSensorDs18b20(Action):
         else:
             while True:
                 # Load kernel modules
-                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm", self._log_tab_num + 1).Ok():
+                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm", \
+                                self.NextLogTab()).Ok():
                     self.SetErr("Error, failed to load sensor modules")
                     break
 
