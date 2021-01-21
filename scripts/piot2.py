@@ -15,6 +15,8 @@ import urllib.parse
 import copy
 import re
 from collections import OrderedDict
+from reportlab.lib.validators import isInstanceOf
+from colorama.ansi import Back
 
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot"
@@ -254,8 +256,18 @@ class Logger(Writer):
 
 #---------------------------------------------------------------------------------------------------
 class LogTab:
-    def __init__(self, log_tab):
-        self._log_tab = log_tab
+    INITIAL_LOG_TAG = 0
+
+    def PushLogTab(lt):
+        LogTab.INITIAL_LOG_TAG = lt._log_tab + 1
+
+    def PopLogTab():
+        value = LogTab.INITIAL_LOG_TAG
+        LogTab.INITIAL_LOG_TAG -= 1
+        return value
+
+    def __init__(self):
+        self._log_tab = LogTab.PopLogTab()
 
     def Log(self, prefix, line):
         log.Log(prefix, line, self._log_tab)
@@ -269,67 +281,130 @@ class LogTab:
     def LogErr(self, line):
         log.Err(line, self._log_tab)
 
-    def NextLogTab(self):
-        return self._log_tab + 1
-
 #---------------------------------------------------------------------------------------------------
 class Backlog(LogTab):
-    BACKLOG_DIR = "backlog"
+    DIR = "backlog"
     DATA_EXTENSION = ".piot2"
-    META_EXTENSION = ".piot2.ext"
+    META_EXTENSION = ".piot2.meta"
 
-    def __init__(self, name, log_tab):
-        super(Backlog, self).__init__(log_tab)
+    def __init__(self, name):
+        super(Backlog, self).__init__()
         self._name = name
-        self._data_path = BACKLOG_DIR + "/" + name + BACKLOG_EXTENSION
-        self._meta_path = BACKLOG_DIR + "/" + name + META_EXTENSION
-        self._meta = self.ReadMeta()
+        self._data_path = Backlog.DIR + "/" + name + Backlog.DATA_EXTENSION
+        self._meta_path = Backlog.DIR + "/" + name + Backlog.META_EXTENSION
+
+        # Metadata
+        self._meta = None
+        if Utils.IsFilePresent(self._meta_path):
+            self._meta = self.ReadMeta()
+            if not self._meta:
+                # Rebuild meta file from data
+                pass
 
     def Write(self, data):
-        pass
+        err = None
+        while True:
+            if isinstance(data, str):
+                data = Utils.StrToJson(data)
 
-    def WriteMeta(self, time_first, time_last):
-        data = OrderedDict({"time-first" : time_first, "time-last":time_last})
+            if not data or not isinstance(data, dict):
+                err = "data is not a json"
+                break
+
+            if not data["time"]:
+                err = "no time"
+                break
+            time = data["time"]
+
+            if not isinstance(time, int):
+                err = "time is not an integer"
+                break
+
+            # Time must increase
+            if self._meta and time <= self._meta["time-last"]:
+                err = "bad time"
+                break
+
+            # Write data
+            path = self._data_path
+            prefix = "  " if not Utils.IsFilePresent(path) or Utils.IsFileEmpty(path) else ", "
+            Utils.WriteFile(path, prefix + Utils.JsonToStr(data) + "\n", False)
+
+            # Write meta
+            self.WriteMeta(
+              self._meta["time-first"] if self._meta else time,
+              time,
+              self._meta["size"] + 1 if self._meta else 1)
+
+            # Update meta
+            self._meta = self.ReadMeta()
+            break
+
+        if err:
+            log.Err("Failed to write backlog :: " + err + " :: path=" + self._data_path)
+        return not err
+
+    def WriteMeta(self, time_first, time_last, size):
+        data = OrderedDict({            \
+            "time-first" : time_first,  \
+            "time-last"  : time_last,
+            "size"       : size})
         Utils.WriteFile(self._meta_path, Utils.JsonToStr(data), True)
 
     def ReadMeta(self):
         data = None
+        err = None
         while True:
             # Read meta file
             body = Utils.ReadFile(self._meta_path)
             if not body:
-                self.LogDbg("Failed to read backlog meta :: file=" + self._meta_path)
+                err = "no body";
                 break
 
             # Parse meta file
             data = Utils.StrToJson(body)
             if not data:
-                self.LogErr("Failed to parse backlog meta :: file=" + self._meta_path)
+                err = "not a json";
                 break
 
             # Read meta entries
-            time_first = 0
-            time_last = 0
+            time_first = time_last = size = 0
             try:
-                time_first = int(data["time-first"])
-                time_last = int(data["time-last"])
+                time_first = data["time-first"]
+                time_last = data["time-last"]
+                size = data["size"]
             except:
-                self.LogErr("Failed to read backlog meta entries :: file=" + self._meta_path)
+                err = "no entries";
                 break
 
-            # Validate meta file
-            if time_last < time_first:
-                self.LogDbg("Failed to validate backlog meta entries :: file=" + self._meta_path)
-                data = None
+            if not isinstance(time_first, int) or not isinstance(time_last, int) or \
+               not isinstance(size, int):
+                err = "not an integer entries"
+                break
+
+            # Validate meta entries
+            if time_last < time_first or size < 0:
+                err = "bad entries";
                 break
 
             break
+
+        if err:
+            self.LogDbg("Failed to read meta file :: " + err + " :: file=" + self._meta_path)
+            data = None
         return data
+
+    def GetStatus(self):
+        status = None
+        if self._meta:
+            return OrderedDict({"age"  : self._meta["time-last"] - self._meta["time-first"], \
+                                "size" : self._meta["size"]})
+        return status
 
 #---------------------------------------------------------------------------------------------------
 class CmdResult(LogTab):
-    def __init__(self, log_tab):
-        super(CmdResult, self).__init__(log_tab)
+    def __init__(self):
+        super(CmdResult, self).__init__()
         self._is_json = False
         self._out = ""
         self._err = ""
@@ -366,8 +441,8 @@ class CmdResult(LogTab):
 
 #---------------------------------------------------------------------------------------------------
 class Cmd(CmdResult):
-    def __init__(self, cmd, log_tab):
-        super(Cmd, self).__init__(log_tab)
+    def __init__(self, cmd):
+        super(Cmd, self).__init__()
         self._cmd = cmd
 
         # Prepare command 
@@ -400,8 +475,8 @@ class Cmd(CmdResult):
 
 #---------------------------------------------------------------------------------------------------
 class ShellCmd(Cmd):
-    def __init__(self, cmd, log_tab):
-        super(ShellCmd, self).__init__(cmd, log_tab)
+    def __init__(self, cmd):
+        super(ShellCmd, self).__init__(cmd)
 
     def Prepare(self):
         self.LogDbg("Running shell command :: cmd=" + self._cmd)
@@ -413,12 +488,12 @@ class ShellCmd(Cmd):
 
 #---------------------------------------------------------------------------------------------------
 class Action(Cmd):
-    def __init__(self, cmd, log_tab, args):
+    def __init__(self, cmd, args):
         self._args = args
         self._status = OrderedDict()
         self._status["action"] = cmd
         self._status["args"] = OrderedDict({})
-        super(Action, self).__init__(cmd, log_tab)
+        super(Action, self).__init__(cmd)
 
     def Prepare(self):
         # Test mandatory arguments
@@ -462,7 +537,7 @@ class ActionError(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(Action):
-    def __init__(self, log_tab, auth_token):
+    def __init__(self, auth_token):
         super(ActionDbCreate, self).__init__("db-create", log_tab, 
           OrderedDict({"auth-token":auth_token}))
 
@@ -474,20 +549,23 @@ class ActionBacklogWrite(Action):
     def __init__(self, sensor_name, data):
         self._sensor_name = sensor_name
         self._data = data
-        super(ActionBacklogWrite, self).__init__("backlog-write", 1,
+        super(ActionBacklogWrite, self).__init__("backlog-write",
           OrderedDict({"sensor-name":sensor_name, "data":data}))
 
     def Run(self):
         while True:
-            # Initialize backlog file
-            path = self.GetBacklogPath(self._sensor_name)
-            if not ShellCmd("mkdir -p backlog && touch " + path, self.NextLogTab()).Ok():
-                self.SetErr("Error, failed init backlog")
+            # Write to backlog
+            backlog = Backlog(self._sensor_name)
+            if not backlog.Write(self._data):
+                self.SetErr("Failed to write to backlog")
                 break
 
-            # Write data to backlog
-            prefix = "  " if Utils.IsFileEmpty(path) else ", "
-            Utils.WriteFile(path, prefix + self._data + "\n", False)
+            # Report status
+            status = backlog.GetStatus()
+            if status:
+                self.SetOut(status)
+            else:
+                self.SetErr("Failed to get backlog status")
             break
 
 #---------------------------------------------------------------------------------------------------
@@ -498,24 +576,7 @@ class ActionBacklogRead(Action):
           OrderedDict({"sensor-name":sensor_name}))
 
     def Run(self):
-        while True:
-            # Read backlog file
-            path = self.GetBacklogPath(self._sensor_name)
-            body = Utils.ReadFile(path)
-            if not body:
-                body = ""
-
-            if not ShellCmd("" + path, self.NextLogTab()).Ok():
-                self.SetErr("Error, failed read backlog")
-                break
-            break
-
-        # Save sensor data
-        data = OrderedDict()
-        data["path"] = os.environ['PWD'] + "/" + path
-        data["size"] = os.environ['PWD'] + "/" + path
-        data["age"] = os.environ['PWD'] + "/" + path
-        self.SetOut(data)
+        pass
 
 #---------------------------------------------------------------------------------------------------
 class ActionReadSensorDs18b20(Action):
@@ -525,7 +586,7 @@ class ActionReadSensorDs18b20(Action):
     def __init__(self, id, random):
         self._id = id
         self._random = random
-        super(ActionReadSensorDs18b20, self).__init__("sensor-ds18b20", 1,
+        super(ActionReadSensorDs18b20, self).__init__("sensor-ds18b20",
           OrderedDict({"sensor-id":id, "random":random}))
 
     def Run(self):
@@ -536,8 +597,8 @@ class ActionReadSensorDs18b20(Action):
         else:
             while True:
                 # Load kernel modules
-                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm", \
-                                self.NextLogTab()).Ok():
+                LogTab.PushLogTab(self)
+                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
                     self.SetErr("Error, failed to load sensor modules")
                     break
 
