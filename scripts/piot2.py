@@ -157,6 +157,13 @@ class Utils:
     def DelFile(path):
         return os.remove(path)
 
+    def CreateDir(name):
+        try:
+            os.mkdir(name)
+        except:
+            return False
+        return True
+
     def SplitLines(lines, prefix, cb):
         first = True
         for l in lines.splitlines():
@@ -191,8 +198,12 @@ class Utils:
         return body
 
     def WriteFile(path, body, clear_file):
-        with open(path, "w" if clear_file else "a") as f:
-            f.write(body)
+        try:
+            with open(path, "w" if clear_file else "a") as f:
+                f.write(body)
+        except:
+            return False
+        return True
 
     def JsonToStr(json_obj):
         try:
@@ -298,11 +309,12 @@ class Backlog(LogTab):
         if Utils.IsFilePresent(self._meta_path):
             self._meta = self.ReadMeta()
             if not self._meta:
-                # Rebuild meta file from data
+                # Rebuild meta file
                 pass
 
     def Write(self, data):
         err = None
+        path = self._data_path
         while True:
             if isinstance(data, str):
                 data = Utils.StrToJson(data)
@@ -325,10 +337,17 @@ class Backlog(LogTab):
                 err = "bad time"
                 break
 
+            # Create backlog dir
+            if not Utils.IsDirPresent(Backlog.DIR) and not Utils.CreateDir(Backlog.DIR):
+                err = "dir create error"
+                break
+
             # Write data
-            path = self._data_path
             prefix = "  " if not Utils.IsFilePresent(path) or Utils.IsFileEmpty(path) else ", "
-            Utils.WriteFile(path, prefix + Utils.JsonToStr(data) + "\n", False)
+            rc = Utils.WriteFile(path, prefix + Utils.JsonToStr(data) + "\n", False)
+            if not rc:
+                err = "file write error"
+                break
 
             # Write meta
             self.WriteMeta(
@@ -555,6 +574,7 @@ class ActionBacklogWrite(Action):
     def Run(self):
         while True:
             # Write to backlog
+            LogTab.PushLogTab(self)
             backlog = Backlog(self._sensor_name)
             if not backlog.Write(self._data):
                 self.SetErr("Failed to write to backlog")
