@@ -12,15 +12,13 @@ import sys
 import socket
 import random
 import urllib.parse
-import copy
 import re
 from collections import OrderedDict
-from reportlab.lib.validators import isInstanceOf
-from colorama.ansi import Back
 
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
+GLOBAL_ARGS = None
 SECONDS = { "s" : 1, 
             "m" : 60, 
             "h" : 60 * 60,
@@ -205,13 +203,13 @@ class Utils:
             return False
         return True
 
-    def JsonToStr(json_obj):
+    def JsonToStr(json_obj, indent = None):
         try:
-            return str(json.dumps(json_obj))
+            return str(json.dumps(json_obj, indent = indent))
         except:
             return "{}"
 
-    def StrToJson(str):
+    def StrToJson(str, indent = None):
         try:
             return json.loads(str)
         except:
@@ -221,9 +219,12 @@ class Utils:
         return socket.gethostname()
 
     def GetUptime():
-        with open('/proc/uptime', 'r') as f:
-            sec = float(f.readline().split()[0])
-        return int(sec)
+        try:
+            with open('/proc/uptime', 'r') as f:
+                sec = float(f.readline().split()[0])
+                return int(sec)
+        except:
+            return 0
 
 #---------------------------------------------------------------------------------------------------
 class Writer:
@@ -267,14 +268,14 @@ class Logger(Writer):
 
 #---------------------------------------------------------------------------------------------------
 class LogTab:
-    INITIAL_LOG_TAG = 0
+    _tab = 0
 
     def PushLogTab(lt):
-        LogTab.INITIAL_LOG_TAG = lt._log_tab + 1
+        LogTab._tab = lt._log_tab + 1
 
     def PopLogTab():
-        value = LogTab.INITIAL_LOG_TAG
-        LogTab.INITIAL_LOG_TAG -= 1
+        value = LogTab._tab
+        LogTab._tab -= 1
         return value
 
     def __init__(self):
@@ -309,7 +310,7 @@ class Backlog(LogTab):
         if Utils.IsFilePresent(self._meta_path):
             self._meta = self.ReadMeta()
             if not self._meta:
-                # Rebuild meta file
+                # TODO: Rebuild meta file
                 pass
 
     def Write(self, data):
@@ -360,8 +361,29 @@ class Backlog(LogTab):
             break
 
         if err:
-            log.Err("Failed to write backlog :: " + err + " :: path=" + self._data_path)
+            log.Err("Failed to write backlog :: " + err + " :: path=" + path)
         return not err
+
+    def Read(self):
+        err = None
+        data_json = None
+        path = self._data_path
+        while True:
+            # Read data as sting
+            data = Utils.ReadFile(path)
+            if not data:
+                data = ""
+
+            # Convert data to json
+            data_json = Utils.StrToJson("[" + data + "]")
+            if not data_json:
+                err = "json parsing failed"
+                break
+            break
+
+        if err:
+            log.Err("Failed to read backlog :: " + err + " :: path=" + path)
+        return data_json
 
     def WriteMeta(self, time_first, time_last, size):
         data = OrderedDict({            \
@@ -373,9 +395,10 @@ class Backlog(LogTab):
     def ReadMeta(self):
         data = None
         err = None
+        path = self._meta_path
         while True:
             # Read meta file
-            body = Utils.ReadFile(self._meta_path)
+            body = Utils.ReadFile(path)
             if not body:
                 err = "no body";
                 break
@@ -409,7 +432,7 @@ class Backlog(LogTab):
             break
 
         if err:
-            self.LogDbg("Failed to read meta file :: " + err + " :: file=" + self._meta_path)
+            self.LogDbg("Failed to read meta file :: " + err + " :: path=" + path)
             data = None
         return data
 
@@ -548,7 +571,7 @@ class ActionError(Action):
     def __init__(self, msg, args):
         self._msg = msg
         self._orig_args = args
-        super(ActionError, self).__init__("error", 1, {})
+        super(ActionError, self).__init__("error", {})
 
     def Run(self):
         self.SetErr(self._msg)
@@ -592,11 +615,24 @@ class ActionBacklogWrite(Action):
 class ActionBacklogRead(Action):
     def __init__(self, sensor_name):
         self._sensor_name = sensor_name
-        super(ActionBacklogRead, self).__init__("backlog-read", 1,
+        super(ActionBacklogRead, self).__init__("backlog-read",
           OrderedDict({"sensor-name":sensor_name}))
 
     def Run(self):
-        pass
+        while True:
+            # Read backlog
+            LogTab.PushLogTab(self)
+            backlog = Backlog(self._sensor_name)
+            data = backlog.Read()
+
+            # Report status
+            status = backlog.GetStatus()
+            if status:
+                status["data"] = data
+                self.SetOut(status)
+            else:
+                self.SetErr("Failed to get backlog status")
+            break
 
 #---------------------------------------------------------------------------------------------------
 class ActionReadSensorDs18b20(Action):
@@ -637,7 +673,75 @@ class ActionReadSensorDs18b20(Action):
         if value != None:
             data["time"] = Utils.GetUnixTimestamp()
             data["value"] = value
+            data["uptime"] = Utils.GetUptime()
         self.SetOut(data)
+
+#---------------------------------------------------------------------------------------------------
+class ActionHttpServer(Action):
+    def __init__(self, addr, port):
+        self._addr = addr
+        self._port = port
+        super(ActionHttpServer, self).__init__("http-server", 
+          OrderedDict({"addr":addr, "port":port}))
+
+    def Run(self):
+        from flask import Flask, jsonify, make_response
+        from flask_restful import Api, Resource, request
+
+        #-------------------------------------------------------------------------------------------
+        class RestApi(Resource):
+            def get(self):
+                self.PrepateRequest()
+                return self.BuildResponse(ActionError("Error, GET not supported"))
+
+            def post(self):
+                args = GLOBAL_ARGS
+
+                # Merge incoming arguments with default arguments
+                json = self.PrepateRequest()
+#                if json:
+#                    args = {**GLOBAL_ARGS, **json}
+                return self.BuildResponse(RunAction(json))
+
+            def put(self):
+                return self.BuildResponse(ActionError("Error, PUT not supported"))
+
+            def delete(self):
+                return self.BuildResponse(ActionError("Error, DELETE not supported"))
+
+            def PrepateRequest(self):
+                port = request.environ.get('REMOTE_PORT')
+                json = self.GetJsonRequest(request)
+#                self.l.LogDbg("json = " + str(json))
+#                self.l.LogDbg("Incoming request :: "                               + \
+#                        "type=" + ("JSON" if request.is_json else "DATA")   + \
+#                        ", port=" + str(port)                               + \
+#                        ", status=" + "ok" if json else "not-ok")
+                return json
+
+            def GetJsonRequest(self, request):
+                if request.is_json:
+                    json = request.get_json()
+                else:
+                    d = request.get_data(as_text = True)
+                    if d and len(d) >= 4 and d[0] == d[1] == '{' and d[-1] == d[-2] == '}':
+                        json_str = d[1:-1]
+                    else:
+                        json_str = None
+
+                    json = Utils.StrToJson(json_str) if json_str else None
+                return json
+
+            def BuildResponse(self, action):
+                status = 200 if action.Ok() else 400
+                resp = make_response(jsonify(action.status), status)
+                resp.headers.add('Access-Control-Allow-Origin', '*')
+                return resp
+
+        app = Flask(APP_NAME)
+        api = Api(app)
+        api.add_resource(RestApi, "/api")
+        app.run(debug = False, host = self._addr, port = self._port)
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(args):
@@ -684,9 +788,9 @@ def RunAction(args):
         #-------------------------------------------------------------------------------------------
         # http-server
         elif name == "http-server":
-#            action = ActionHttpServer(
-#                args.get("addr"),
-#                args.get("port"))
+            action = ActionHttpServer(
+                args.get("addr"),
+                args.get("port"))
             pass
 
         # http-client
@@ -704,9 +808,8 @@ def RunAction(args):
         #-------------------------------------------------------------------------------------------
         # backlog-read
         elif name == "backlog-read":
-#            action = ActionBacklogRead(
-#                args.get("sensor-name"));
-            pass
+            action = ActionBacklogRead(
+                args.get("sensor-name"));
 
         # backlog-write
         elif name == "backlog-write":
@@ -759,7 +862,7 @@ if __name__ == "__main__":
         help='Transport protocol (HTTP or HTTPS)')
     parser.add_argument('--auth-token', action='store', 
         help='Authentication token')
-    parser.add_argument('--addr', action='store', 
+    parser.add_argument('--addr', action='store', default="localhost",
         help='Address of the server')
     parser.add_argument('--port', action='store', type=int, default=8000, 
         help='Listening port of the server')
@@ -769,12 +872,13 @@ if __name__ == "__main__":
         help='Clean log file')
 
     # Build list arguments
-    args = {}
+    GLOBAL_ARGS = {}
     for key, value in vars(parser.parse_args()).items():
-        args[key.replace("_", "-")] = value
+        GLOBAL_ARGS[key.replace("_", "-")] = value
 
     # Log writer
-    log = Logger("stdout" if args["action"] == "http-server" else LOG_FILE, args["clean-log"])
+    log = Logger("stdout" if GLOBAL_ARGS["action"] == "http-server" \
+                          else LOG_FILE, GLOBAL_ARGS["clean-log"])
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
 
@@ -782,5 +886,5 @@ if __name__ == "__main__":
     out = Writer(sys.stdout)
 
     # Run action
-    action = RunAction(args)
+    action = RunAction(GLOBAL_ARGS)
     sys.exit(action.Rc() if action else 0)

@@ -21,5 +21,14 @@ while [ 1 ]; do
     echo "    >> data    = $data"
     echo "    >> success = $success:$rc"
     [ x$success != xtrue ] && break
+
+    echo "  3) Reading backlog :: name=$SENSOR_NAME"
+    out=`$PIOT --action=backlog-read --sensor-name=$SENSOR_NAME`; rc=$?
+    data=`echo $out | jq -c .out`
+    success=`echo $out | jq .success`
+    echo "    >> data    = $data"
+    echo "    >> success = $success:$rc"
+    [ x$success != xtrue ] && break
+
     break
 done
