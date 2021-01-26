@@ -18,7 +18,6 @@ from collections import OrderedDict
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
-GLOBAL_ARGS = None
 SECONDS = { "s" : 1, 
             "m" : 60, 
             "h" : 60 * 60,
@@ -295,15 +294,18 @@ class LogTab:
 
 #---------------------------------------------------------------------------------------------------
 class Backlog(LogTab):
-    DIR = "backlog"
     DATA_EXTENSION = ".piot2"
     META_EXTENSION = ".piot2.meta"
+
+    _dir = "backlog"
+    def InitDir(suffix):
+        Backlog._dir = "backlog-" + suffix
 
     def __init__(self, name):
         super(Backlog, self).__init__()
         self._name = name
-        self._data_path = Backlog.DIR + "/" + name + Backlog.DATA_EXTENSION
-        self._meta_path = Backlog.DIR + "/" + name + Backlog.META_EXTENSION
+        self._data_path = Backlog._dir + "/" + name + Backlog.DATA_EXTENSION
+        self._meta_path = Backlog._dir + "/" + name + Backlog.META_EXTENSION
 
         # Metadata
         self._meta = None
@@ -339,7 +341,7 @@ class Backlog(LogTab):
                 break
 
             # Create backlog dir
-            if not Utils.IsDirPresent(Backlog.DIR) and not Utils.CreateDir(Backlog.DIR):
+            if not Utils.IsDirPresent(Backlog._dir) and not Utils.CreateDir(Backlog._dir):
                 err = "dir create error"
                 break
 
@@ -500,10 +502,10 @@ class Cmd(CmdResult):
         # Write log
         self.LogDbg(">> rc  = " + str(self.Rc()))
         out_str = self.OutStr()
-        if len(out_str) > 0:
+        if out_str and len(out_str) > 0:
             Utils.LogLines("DBG", ">> out = ", out_str, self._log_tab)
         err_str = self.Err()
-        if len(err_str) > 0:
+        if err_str and len(err_str) > 0:
             Utils.LogLines("DBG", ">> err = ", err_str, self._log_tab)
 
     def Prepare(self):
@@ -691,32 +693,28 @@ class ActionHttpServer(Action):
         #-------------------------------------------------------------------------------------------
         class RestApi(Resource):
             def get(self):
-                self.PrepateRequest()
-                return self.BuildResponse(ActionError("Error, GET not supported"))
+                return self.BuildResponseNotSupported("get")
 
             def post(self):
-                args = GLOBAL_ARGS
-
-                # Merge incoming arguments with default arguments
-                json = self.PrepateRequest()
-#                if json:
-#                    args = {**GLOBAL_ARGS, **json}
-                return self.BuildResponse(RunAction(json))
+                return self.BuildResponse(
+                  RunAction(self.PrepateRequest("post")))
 
             def put(self):
-                return self.BuildResponse(ActionError("Error, PUT not supported"))
+                return self.BuildResponseNotSupported("put")
 
             def delete(self):
-                return self.BuildResponse(ActionError("Error, DELETE not supported"))
+                return self.BuildResponseNotSupported("delete")
 
-            def PrepateRequest(self):
+            def PrepateRequest(self, type):
                 port = request.environ.get('REMOTE_PORT')
                 json = self.GetJsonRequest(request)
-#                self.l.LogDbg("json = " + str(json))
-#                self.l.LogDbg("Incoming request :: "                               + \
-#                        "type=" + ("JSON" if request.is_json else "DATA")   + \
-#                        ", port=" + str(port)                               + \
-#                        ", status=" + "ok" if json else "not-ok")
+                log.Dbg("." * 80)
+                log.Dbg("Incoming request :: "                              + \
+                        "time=" + str(Utils.GetTimestamp())                 + \
+                        ", type=" + type                                    + \
+                        ", is-json=" + ("yes" if request.is_json else "no") + \
+                        ", port=" + str(port)                               + \
+                        ", status=" + "ok" if json else "not-ok")
                 return json
 
             def GetJsonRequest(self, request):
@@ -734,9 +732,14 @@ class ActionHttpServer(Action):
 
             def BuildResponse(self, action):
                 status = 200 if action.Ok() else 400
-                resp = make_response(jsonify(action.status), status)
-                resp.headers.add('Access-Control-Allow-Origin', '*')
+                resp = make_response(jsonify(action._status), status)
+#                resp.headers.add('Access-Control-Allow-Origin', '*')
                 return resp
+
+            def BuildResponseNotSupported(self, type):
+                return self.BuildResponse(
+                  ActionError("Error, " + type + " not supported", 
+                              self.PrepateRequest(type)))
 
         app = Flask(APP_NAME)
         api = Api(app)
@@ -872,19 +875,22 @@ if __name__ == "__main__":
         help='Clean log file')
 
     # Build list arguments
-    GLOBAL_ARGS = {}
+    args = {}
     for key, value in vars(parser.parse_args()).items():
-        GLOBAL_ARGS[key.replace("_", "-")] = value
+        args[key.replace("_", "-")] = value
 
     # Log writer
-    log = Logger("stdout" if GLOBAL_ARGS["action"] == "http-server" \
-                          else LOG_FILE, GLOBAL_ARGS["clean-log"])
+    log = Logger("stdout" if args["action"] == "http-server" \
+                          else LOG_FILE, args["clean-log"])
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
+
+    # Init backlog
+    Backlog.InitDir("server" if args["action"] == "http-server" else "client")
 
     # Stdout writer
     out = Writer(sys.stdout)
 
     # Run action
-    action = RunAction(GLOBAL_ARGS)
+    action = RunAction(args)
     sys.exit(action.Rc() if action else 0)
