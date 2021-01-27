@@ -695,7 +695,6 @@ class ActionHttpServer(Action):
                 return self.BuildErrorResponse("get")
 
             def post(self):
-                log.Dbg("JJFK :: 1")
                 return self.BuildResponse(
                   RunAction(self.PrepateRequest("post"), 
                             ActionHttpServer.ALLOWED_ACTIONS))
@@ -707,45 +706,35 @@ class ActionHttpServer(Action):
                 return self.BuildErrorResponse("delete")
 
             def PrepateRequest(self, method):
-                log.Dbg("JJFK :: 2")
                 port = request.environ.get('REMOTE_PORT')
-                log.Dbg("JJFK :: 3")
                 json = self.GetJsonRequest(request)
-                log.Dbg("JJFK :: 4")
                 log.Dbg("." * 80)
-                log.Dbg("JJFK :: 5 :: json=" + str(json))
                 log.Dbg("Incoming request :: "                                + \
                         "time=" + str(Utils.GetTimestamp())                   + \
                         ", method=" + method                                  + \
-                        ", data=" + ("json" if request.is_json else "string") + \
                         ", port=" + str(port)                                 + \
-                        ", status=" + "ok" if json else "not-ok")
-                log.Dbg("JJFK :: 6")
-                return json
+                        ", json=" + ("yes" if json else "no"))
+                return json if json else {}
 
             def GetJsonRequest(self, request):
                 if request.is_json:
-                    json = request.get_json()
+                    json = request.get_json(silent=True)
                 else:
-                    d = request.get_data(as_text = True)
+                    d = request.get_data(as_text=True)
                     if d and len(d) >= 4 and d[0] == d[1] == '{' and d[-1] == d[-2] == '}':
                         json_str = d[1:-1]
                     else:
                         json_str = None
-
                     json = Utils.StrToJson(json_str) if json_str else None
                 return json
 
             def BuildResponse(self, action):
-                status = 200 if action.Ok() else 400
-                resp = make_response(jsonify(action._status), status)
-#                resp.headers.add('Access-Control-Allow-Origin', '*')
-                return resp
+                return make_response(jsonify(action._status), 200)
 
             def BuildErrorResponse(self, method):
                 return self.BuildResponse(
                   ActionError(method + " not supported", 
-                              self.PrepateRequest(type)))
+                              self.PrepateRequest(method)))
 
         app = Flask(APP_NAME)
         api = Api(app)
