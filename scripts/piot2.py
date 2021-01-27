@@ -11,12 +11,11 @@ import datetime
 import sys
 import socket
 import random
-import urllib.parse
 import re
 from collections import OrderedDict
 
 #---------------------------------------------------------------------------------------------------
-APP_NAME = "piot"
+APP_NAME = "piot2"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
 SECONDS = { "s" : 1, 
             "m" : 60, 
@@ -42,7 +41,7 @@ class Utils:
     def GetTimestamp():
         return time.time()
 
-    def GetTimestampFromString(val, fmt = "%Y-%m-%dT%H:%M:%S.%fZ"):
+    def GetTimestampFromString(val, fmt="%Y-%m-%dT%H:%M:%S.%fZ"):
         try:
             dt = datetime.datetime.strptime(val, fmt)
             ts = datetime.datetime.timestamp(dt)
@@ -50,13 +49,13 @@ class Utils:
         except:
             return None
 
-    def GetStringFromTimestamp(val, fmt = "%Y-%m-%dT%H:%M:%S.%fZ"):
+    def GetStringFromTimestamp(val, fmt="%Y-%m-%dT%H:%M:%S.%fZ"):
         try:
             return datetime.datetime.fromtimestamp(val).strftime(fmt)
         except:
             return "error"
 
-    def GetTimestampFromTimedef(timedef, now_ts = None):
+    def GetTimestampFromTimedef(timedef, now_ts=None):
         #0 - base
         #1 - offset
         #2 - offset direction
@@ -230,7 +229,7 @@ class Writer:
     def __init__(self, stream):
         self._stream = stream
 
-    def Write(self, str, flush = True, new_line = True):
+    def Write(self, str, flush=True, new_line=True):
         if not self._stream:
             return
         if new_line:
@@ -241,7 +240,7 @@ class Writer:
 
 #---------------------------------------------------------------------------------------------------
 class Logger(Writer):
-    def __init__(self, dest, clean_log = False):
+    def __init__(self, dest, clean_log=False):
         stream = None
         if dest == "stdout":
             stream = sys.stdout
@@ -254,7 +253,7 @@ class Logger(Writer):
 
     def Log(self, prefix, line, tab_num):
         tab_filler = " " + '...' * tab_num + " "
-        self.Write(prefix + tab_filler + line, flush = False)
+        self.Write(prefix + tab_filler + line, flush=False)
 
     def Dbg(self, line, tab_num = 0):
         self.Log("DBG", line, tab_num)
@@ -563,7 +562,7 @@ class Action(Cmd):
         # Set error message
         err_str = self.Err()
         if len(err_str) > 0:
-            self._status["message"] = err_str
+            self._status["error"] = err_str
 
         # Set output
         self._status["out"] = self.OutJson()
@@ -572,12 +571,10 @@ class Action(Cmd):
 class ActionError(Action):
     def __init__(self, msg, args):
         self._msg = msg
-        self._orig_args = args
-        super(ActionError, self).__init__("error", {})
+        super(ActionError, self).__init__("error", args)
 
     def Run(self):
         self.SetErr(self._msg)
-        self.SetOut(self._orig_args)
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(Action):
@@ -657,14 +654,14 @@ class ActionReadSensorDs18b20(Action):
                 # Load kernel modules
                 LogTab.PushLogTab(self)
                 if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
-                    self.SetErr("Error, failed to load sensor modules")
+                    self.SetErr("Failed to load sensor modules")
                     break
 
                 # Read sensor data
                 value_raw = Utils.ReadFile( \
                   self.DS18B20_PATH + "/" + str(self._id) + "/" + self.DS18B20_DATA)
                 if not value_raw:
-                    self.SetErr("Error, failed to read sensor value")
+                    self.SetErr("Failed to read sensor value")
                     break
 
                 value = value_raw / 1000
@@ -680,6 +677,8 @@ class ActionReadSensorDs18b20(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionHttpServer(Action):
+    ALLOWED_ACTIONS = ["backlog-write", "read-sensor-ds18b20"]
+
     def __init__(self, addr, port):
         self._addr = addr
         self._port = port
@@ -693,28 +692,35 @@ class ActionHttpServer(Action):
         #-------------------------------------------------------------------------------------------
         class RestApi(Resource):
             def get(self):
-                return self.BuildResponseNotSupported("get")
+                return self.BuildErrorResponse("get")
 
             def post(self):
+                log.Dbg("JJFK :: 1")
                 return self.BuildResponse(
-                  RunAction(self.PrepateRequest("post")))
+                  RunAction(self.PrepateRequest("post"), 
+                            ActionHttpServer.ALLOWED_ACTIONS))
 
             def put(self):
-                return self.BuildResponseNotSupported("put")
+                return self.BuildErrorResponse("put")
 
             def delete(self):
-                return self.BuildResponseNotSupported("delete")
+                return self.BuildErrorResponse("delete")
 
-            def PrepateRequest(self, type):
+            def PrepateRequest(self, method):
+                log.Dbg("JJFK :: 2")
                 port = request.environ.get('REMOTE_PORT')
+                log.Dbg("JJFK :: 3")
                 json = self.GetJsonRequest(request)
+                log.Dbg("JJFK :: 4")
                 log.Dbg("." * 80)
-                log.Dbg("Incoming request :: "                              + \
-                        "time=" + str(Utils.GetTimestamp())                 + \
-                        ", type=" + type                                    + \
-                        ", is-json=" + ("yes" if request.is_json else "no") + \
-                        ", port=" + str(port)                               + \
+                log.Dbg("JJFK :: 5 :: json=" + str(json))
+                log.Dbg("Incoming request :: "                                + \
+                        "time=" + str(Utils.GetTimestamp())                   + \
+                        ", method=" + method                                  + \
+                        ", data=" + ("json" if request.is_json else "string") + \
+                        ", port=" + str(port)                                 + \
                         ", status=" + "ok" if json else "not-ok")
+                log.Dbg("JJFK :: 6")
                 return json
 
             def GetJsonRequest(self, request):
@@ -736,26 +742,75 @@ class ActionHttpServer(Action):
 #                resp.headers.add('Access-Control-Allow-Origin', '*')
                 return resp
 
-            def BuildResponseNotSupported(self, type):
+            def BuildErrorResponse(self, method):
                 return self.BuildResponse(
-                  ActionError("Error, " + type + " not supported", 
+                  ActionError(method + " not supported", 
                               self.PrepateRequest(type)))
 
         app = Flask(APP_NAME)
         api = Api(app)
         api.add_resource(RestApi, "/api")
-        app.run(debug = False, host = self._addr, port = self._port)
+        app.run(debug=False, host=self._addr, port=self._port)
 
 #---------------------------------------------------------------------------------------------------
-def RunAction(args):
+class ActionHttpClient(Action):
+    def __init__(self, proto, addr, port, auth_token, data):
+        self._proto = proto
+        self._addr = addr
+        self._port = port
+        self._auth_token = auth_token
+        self._data = data
+        super(ActionHttpClient, self).__init__("http-client", 
+          OrderedDict({"proto":proto, "addr":addr, "port":port, "auth-token":auth_token, "data":data}))
+
+    def Run(self):
+        from urllib import request
+        from urllib import error
+        while True:
+            req = request.Request(
+              method="POST",
+              url=self._proto + "://" + self._addr + ":" + str(self._port) + "/api",
+              headers={"Content-type":"application/json"},
+              data=self._data.encode("utf-8"))
+            resp = None
+            try:
+                resp = request.urlopen(req)
+                resp_data = resp.read()
+            except error.HTTPError as e:
+                pass
+            except:
+                self.SetErr("Failed to send URL request")
+                break
+
+            if not resp or not resp_data:
+                self.SetErr("Failed to read response")
+                break
+
+            json = Utils.StrToJson(resp_data)
+            if not json:
+                self.SetErr("Failed to parse response")
+                break
+            else:
+                self.SetOut(json)
+
+            if resp.status != 200:
+                self.SetErr("Bad response :: " + resp.reason, resp.status)
+                break
+            break
+
+#---------------------------------------------------------------------------------------------------
+def RunAction(args, allowed=None):
     while True:
+        # Filter actions
         name = args.get("action") if args else None
+        if allowed and name not in allowed:
+            action = ActionError("Action not allowed", args)
 
         #-------------------------------------------------------------------------------------------
         # DB
         #-------------------------------------------------------------------------------------------
         # db-init
-        if name == "db-init":
+        elif name == "db-init":
 #            action = ActionDbInit(
 #                args.get("auth-token"))
             pass
@@ -798,12 +853,12 @@ def RunAction(args):
 
         # http-client
         elif name == "http-client":
-#            action = ActionHttpClient(
-#                args.get("proto"), 
-#                args.get("addr"),
-#                args.get("port"), 
-#                args.get("auth-token"),
-#                args.get("data"))
+            action = ActionHttpClient(
+                args.get("proto"), 
+                args.get("addr"),
+                args.get("port"), 
+                args.get("auth-token"),
+                args.get("data"))
             pass
 
         #-------------------------------------------------------------------------------------------
@@ -831,11 +886,11 @@ def RunAction(args):
 
         # error
         else: 
-            action = ActionError("Error, unknown action", args)
+            action = ActionError("Unknown action", args)
         break
 
-    # Log 
-    out.Write(Utils.JsonToStr(action._status), flush = False)
+    # Log to console
+    out.Write(Utils.JsonToStr(action._status), flush=True)
     return action
 
 #---------------------------------------------------------------------------------------------------
@@ -879,17 +934,17 @@ if __name__ == "__main__":
     for key, value in vars(parser.parse_args()).items():
         args[key.replace("_", "-")] = value
 
-    # Log writer
+    # Init logger writer
     log = Logger("stdout" if args["action"] == "http-server" \
                           else LOG_FILE, args["clean-log"])
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
 
-    # Init backlog
-    Backlog.InitDir("server" if args["action"] == "http-server" else "client")
-
-    # Stdout writer
+    # Init stdout writer
     out = Writer(sys.stdout)
+
+    # Init backlog directory
+    Backlog.InitDir("server" if args["action"] == "http-server" else "client")
 
     # Run action
     action = RunAction(args)
