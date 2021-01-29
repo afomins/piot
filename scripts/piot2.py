@@ -88,12 +88,12 @@ class Utils:
 
             groups = match.groups()
             if len(groups) != 7:
-                err = "wrong groups" ; break
+                err = "wrong groups"; break
 
             # Base
             base = groups[0]
             if base != "now":
-                err = "bad base" ; break
+                err = "bad base"; break
 
             # Offset
             if groups[1]:
@@ -107,7 +107,7 @@ class Utils:
                 # Unit
                 off_unit = groups[4]
                 if off_unit not in SECONDS:
-                    err = "bad unit" ; break
+                    err = "bad unit"; break
 
                 # Process time offset that is expressed in seconds (s|m|h|d|w)
                 secs = SECONDS[off_unit]
@@ -134,9 +134,7 @@ class Utils:
             if dt:
                 ts = datetime.datetime.timestamp(dt)
 
-            # End loop
-            break
-
+            break # while
         if err:
             log.Err("Timedef parsing failed, " + err + " :: val=" + timedef)
         return ts
@@ -296,79 +294,101 @@ class Backlog(LogTab):
     DATA_EXTENSION = ".piot2"
     META_EXTENSION = ".piot2.meta"
 
-    _dir = "backlog"
+    dir = "backlog"
     def InitDir(suffix):
-        Backlog._dir = "backlog-" + suffix
+        Backlog.dir = "backlog-" + suffix
 
     def __init__(self, name):
         super(Backlog, self).__init__()
         self._name = name
-        self._data_path = Backlog._dir + "/" + name + Backlog.DATA_EXTENSION
-        self._meta_path = Backlog._dir + "/" + name + Backlog.META_EXTENSION
+        self._data_path = Backlog.dir + "/" + name + Backlog.DATA_EXTENSION
+        self._meta_path = Backlog.dir + "/" + name + Backlog.META_EXTENSION
 
-        # Metadata
+        # Validate data & meta
+        data_exists = Utils.IsFilePresent(self._data_path)
+        meta_exists = Utils.IsFilePresent(self._meta_path)
+        if data_exists and meta_exists:
+            # TODO: Validate meta
+            pass
+
+        elif meta_exists and not data_exists:
+            # TODO: clear meta
+            pass
+        
+        elif not meta_exists and data_exists:
+            # TODO: Rebuild meta
+            pass
+
+        # Test metadata
         self._meta = None
         if Utils.IsFilePresent(self._meta_path):
             self._meta = self.ReadMeta()
-            if not self._meta:
-                # TODO: Rebuild meta file
-                pass
 
     def Write(self, data):
-        err = None
         path = self._data_path
+        err = None
         while True:
             if isinstance(data, str):
                 data = Utils.StrToJson(data)
 
-            if not data or not isinstance(data, dict):
-                err = "data is not a json"
-                break
+            # Data must be list of dicts
+            if not data or not isinstance(data, list):
+                err = "data is not a list"; break
 
-            if not data["time"]:
-                err = "no time"
-                break
-            time = data["time"]
+            # Get time of last written entry
+            last_time = self._meta["time-last"] if self._meta else 0
 
-            if not isinstance(time, int):
-                err = "time is not an integer"
-                break
+            # Parse all data entries
+            data_str = None
+            for entry in data:
+                if not isinstance(entry, dict):
+                    err = "data entry is not a dict"; break
 
-            # Time must increase
-            if self._meta and time <= self._meta["time-last"]:
-                err = "bad time"
-                break
+                if not entry["time"]:
+                    err = "data entry has no time"; break
+                time = entry["time"]
+
+                if not isinstance(time, int):
+                    err = "time is not an integer"; break
+
+                if time <= last_time:
+                    err = "time does not increase :: time=" + str(time) + \
+                                                   " last_time=" + str(last_time); break
+                last_time = time
+
+                # Convert entry to string
+                if not data_str:
+                    data_str = "  " if not Utils.IsFilePresent(path) \
+                                        or Utils.IsFileEmpty(path) else ", "
+                else:
+                    data_str += ", "
+                data_str += Utils.JsonToStr(entry) + "\n"
+            if err: break
 
             # Create backlog dir
-            if not Utils.IsDirPresent(Backlog._dir) and not Utils.CreateDir(Backlog._dir):
-                err = "dir create error"
-                break
+            if not Utils.IsDirPresent(Backlog.dir) and \
+               not Utils.CreateDir(Backlog.dir):
+                err = "no dir"; break
 
             # Write data
-            prefix = "  " if not Utils.IsFilePresent(path) or Utils.IsFileEmpty(path) else ", "
-            rc = Utils.WriteFile(path, prefix + Utils.JsonToStr(data) + "\n", False)
-            if not rc:
-                err = "file write error"
-                break
+            if not Utils.WriteFile(path, data_str, False):
+                err = "write error"; break
 
-            # Write meta
-            self.WriteMeta(
+            # Update meta
+            self._meta = self.UpdateMeta(
               self._meta["time-first"] if self._meta else time,
               time,
               self._meta["size"] + 1 if self._meta else 1)
 
-            # Update meta
-            self._meta = self.ReadMeta()
-            break
-
+            break # while
         if err:
-            log.Err("Failed to write backlog :: " + err + " :: path=" + path)
+            self.LogErr("Failed to write backlog :: " + err + " :: path=" + path)
         return not err
 
     def Read(self):
-        err = None
         data_json = None
         path = self._data_path
+        err = None
         while True:
             # Read data as sting
             data = Utils.ReadFile(path)
@@ -378,13 +398,28 @@ class Backlog(LogTab):
             # Convert data to json
             data_json = Utils.StrToJson("[" + data + "]")
             if not data_json:
-                err = "json parsing failed"
-                break
-            break
+                err = "json parsing failed"; break
 
+            break # while
         if err:
-            log.Err("Failed to read backlog :: " + err + " :: path=" + path)
+            self.LogErr("Failed to read backlog :: " + err + " :: path=" + path)
         return data_json
+
+    def Clear(self):
+        path = self._data_path
+        err = None
+        while True:
+            # Overwrite backlog
+            if not Utils.WriteFile(path, "", True):
+                err = "write failed"; break
+    
+            # Update meta
+            self._meta = self.UpdateMeta(0, 0, 0)
+
+            break # while
+        if err:
+            self.LogErr("Faild to clear backlog :: err=" + err + " path=" + path)
+        return not err
 
     def WriteMeta(self, time_first, time_last, size):
         data = OrderedDict({            \
@@ -401,14 +436,12 @@ class Backlog(LogTab):
             # Read meta file
             body = Utils.ReadFile(path)
             if not body:
-                err = "no body";
-                break
+                err = "no body"; break
 
             # Parse meta file
             data = Utils.StrToJson(body)
             if not data:
-                err = "not a json";
-                break
+                err = "not a json"; break
 
             # Read meta entries
             time_first = time_last = size = 0
@@ -417,25 +450,26 @@ class Backlog(LogTab):
                 time_last = data["time-last"]
                 size = data["size"]
             except:
-                err = "no entries";
-                break
+                err = "no entries"; break
 
-            if not isinstance(time_first, int) or not isinstance(time_last, int) or \
+            if not isinstance(time_first, int) or \
+               not isinstance(time_last, int) or \
                not isinstance(size, int):
-                err = "not an integer entries"
-                break
+                err = "not an integer entries"; break
 
             # Validate meta entries
             if time_last < time_first or size < 0:
-                err = "bad entries";
-                break
+                err = "bad entries"; break
 
-            break
-
+            break # while
         if err:
             self.LogDbg("Failed to read meta file :: " + err + " :: path=" + path)
             data = None
         return data
+
+    def UpdateMeta(self, time_first, time_last, size):
+        self.WriteMeta(time_first, time_last, size)
+        return self.ReadMeta()
 
     def GetStatus(self):
         status = None
@@ -454,9 +488,11 @@ class CmdResult(LogTab):
         self._rc = 0
 
     def SetOut(self, out):
-        # OrderedDict is list of key-value tuples
-        self._is_json = isinstance(out, dict) or isinstance(out, list)
-        self._out = out
+        if out:
+            # OrderedDict is list of key-value tuples
+            self._is_json = isinstance(out, dict) or isinstance(out, list)
+            self._out = out
+        return out
 
     def SetErr(self, err = "hmm... something went wrong :(", rc = 42):
         self._err = err
@@ -594,21 +630,45 @@ class ActionBacklogWrite(Action):
           OrderedDict({"sensor-name":sensor_name, "data":data}))
 
     def Run(self):
+        err = None
         while True:
             # Write to backlog
             LogTab.PushLogTab(self)
             backlog = Backlog(self._sensor_name)
             if not backlog.Write(self._data):
-                self.SetErr("Failed to write to backlog")
-                break
+                err = "write error"; break
 
-            # Report status
-            status = backlog.GetStatus()
-            if status:
-                self.SetOut(status)
-            else:
-                self.SetErr("Failed to get backlog status")
-            break
+            # Set status
+            if not self.SetOut(backlog.GetStatus()):
+                err = "no status"; break
+
+            break # while
+        if err:
+            self.SetErr("Failed to write backlog :: " + err);
+
+#---------------------------------------------------------------------------------------------------
+class ActionBacklogClear(Action):
+    def __init__(self, sensor_name):
+        self._sensor_name = sensor_name
+        super(ActionBacklogClear, self).__init__("backlog-clear",
+          OrderedDict({"sensor-name":sensor_name}))
+
+    def Run(self):
+        err = None
+        while True:
+            # Clear to backlog
+            LogTab.PushLogTab(self)
+            backlog = Backlog(self._sensor_name)
+            if not backlog.Clear():
+                err = "clear error"; break
+
+            # Set status
+            if not self.SetOut(backlog.GetStatus()):
+                err = "no status"; break
+
+            break # while
+        if err:
+            self.SetErr("Failed to clear backlog :: " + err)
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogRead(Action):
@@ -618,20 +678,25 @@ class ActionBacklogRead(Action):
           OrderedDict({"sensor-name":sensor_name}))
 
     def Run(self):
+        err = None
         while True:
             # Read backlog
             LogTab.PushLogTab(self)
             backlog = Backlog(self._sensor_name)
             data = backlog.Read()
 
-            # Report status
+            # Set status
             status = backlog.GetStatus()
-            if status:
-                status["data"] = data
-                self.SetOut(status)
-            else:
-                self.SetErr("Failed to get backlog status")
-            break
+            if not status:
+                err = "no status"; break
+
+            # Write data to status
+            status["data"] = data
+            self.SetOut(status)
+
+            break # while
+        if err:
+            self.SetErr("Failed to read backlog :: " + err)
 
 #---------------------------------------------------------------------------------------------------
 class ActionReadSensorDs18b20(Action):
@@ -650,22 +715,23 @@ class ActionReadSensorDs18b20(Action):
             value = random.randrange(-10, 100)
 
         else:
+            err = None
             while True:
                 # Load kernel modules
                 LogTab.PushLogTab(self)
                 if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
-                    self.SetErr("Failed to load sensor modules")
-                    break
+                    err = "load modules error"; break
 
                 # Read sensor data
                 value_raw = Utils.ReadFile( \
                   self.DS18B20_PATH + "/" + str(self._id) + "/" + self.DS18B20_DATA)
                 if not value_raw:
-                    self.SetErr("Failed to read sensor value")
-                    break
-
+                    err = "no value"; break
                 value = value_raw / 1000
-                break
+
+                break # while
+            if err:
+                self.SetErr("Failed to read sensor Ds18b20 :: " + err)
 
         # Save sensor data
         data = OrderedDict()
@@ -705,17 +771,6 @@ class ActionHttpServer(Action):
             def delete(self):
                 return self.BuildErrorResponse("delete")
 
-            def PrepateRequest(self, method):
-                port = request.environ.get('REMOTE_PORT')
-                json = self.GetJsonRequest(request)
-                log.Dbg("." * 80)
-                log.Dbg("Incoming request :: "                                + \
-                        "time=" + str(Utils.GetTimestamp())                   + \
-                        ", method=" + method                                  + \
-                        ", port=" + str(port)                                 + \
-                        ", json=" + ("yes" if json else "no"))
-                return json if json else {}
-
             def GetJsonRequest(self, request):
                 if request.is_json:
                     json = request.get_json(silent=True)
@@ -727,6 +782,17 @@ class ActionHttpServer(Action):
                         json_str = None
                     json = Utils.StrToJson(json_str) if json_str else None
                 return json
+
+            def PrepateRequest(self, method):
+                port = request.environ.get('REMOTE_PORT')
+                json = self.GetJsonRequest(request)
+                log.Dbg("." * 80)
+                log.Dbg("Incoming request :: "                                + \
+                        "time=" + str(Utils.GetTimestamp())                   + \
+                        ", method=" + method                                  + \
+                        ", port=" + str(port)                                 + \
+                        ", json=" + ("yes" if json else "no"))
+                return json if json else {}
 
             def BuildResponse(self, action):
                 return make_response(jsonify(action._status), 200)
@@ -755,7 +821,10 @@ class ActionHttpClient(Action):
     def Run(self):
         from urllib import request
         from urllib import error
+
+        err = None
         while True:
+            # Send HTTP request
             req = request.Request(
               method="POST",
               url=self._proto + "://" + self._addr + ":" + str(self._port) + "/api",
@@ -766,40 +835,51 @@ class ActionHttpClient(Action):
                 resp = request.urlopen(req)
                 resp_data = resp.read()
             except error.HTTPError as e:
+                # Bad HTTP status
                 pass
             except:
-                self.SetErr("Failed to send URL request")
-                break
+                err = "send error"; break
 
+            # Test response
             if not resp or not resp_data:
-                self.SetErr("Failed to read response")
-                break
+                err = "no response"; break
 
-            json = Utils.StrToJson(resp_data)
-            if not json:
-                self.SetErr("Failed to parse response")
-                break
-            else:
-                self.SetOut(json)
+            # Parse response
+            if not self.SetOut(Utils.StrToJson(resp_data)):
+                err = "bad response"; break
 
+            # Test status
             if resp.status != 200:
-                self.SetErr("Bad response :: " + resp.reason, resp.status)
-                break
-            break
+                err = "bad response :: reason=" + str(resp.reason) + \
+                                     " status=" + str(resp.status); break
+
+            break # while
+        if err:
+            self.SetErr("Failed to run http client :: " + err)
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(args, allowed=None):
+    err = None
     while True:
+        # Sanity check arguments
+        if not args or not isinstance(args, dict):
+            args = {}
+            err = "bad arguments"; break
+
+        # Get name of the action
+        name = args.get("action")
+        if not name:
+            err = "no action"; break
+
         # Filter actions
-        name = args.get("action") if args else None
         if allowed and name not in allowed:
-            action = ActionError("Action not allowed", args)
+            err = "not allowed"; break
 
         #-------------------------------------------------------------------------------------------
         # DB
         #-------------------------------------------------------------------------------------------
         # db-init
-        elif name == "db-init":
+        if name == "db-init":
 #            action = ActionDbInit(
 #                args.get("auth-token"))
             pass
@@ -843,7 +923,7 @@ def RunAction(args, allowed=None):
         # http-client
         elif name == "http-client":
             action = ActionHttpClient(
-                args.get("proto"), 
+                args.get("proto"),
                 args.get("addr"),
                 args.get("port"), 
                 args.get("auth-token"),
@@ -864,6 +944,12 @@ def RunAction(args, allowed=None):
                 args.get("sensor-name"),
                 args.get("data"));
 
+        # backlog-clean
+        elif name == "backlog-clear":
+            action = ActionBacklogClear(
+                args.get("sensor-name"));
+            pass
+
         #-------------------------------------------------------------------------------------------
         # SENSORS
         #-------------------------------------------------------------------------------------------
@@ -874,11 +960,14 @@ def RunAction(args, allowed=None):
                 args.get("random"))
 
         # error
-        else: 
-            action = ActionError("Unknown action", args)
-        break
+        if not action:
+            err = "unknown action"; break
 
-    # Log to console
+        break # while
+    if err:
+        action = ActionError("Failed to run action :: " + err, args);
+
+    # Log to terminal
     out.Write(Utils.JsonToStr(action._status), flush=True)
     return action
 
