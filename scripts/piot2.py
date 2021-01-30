@@ -335,8 +335,12 @@ class Backlog(LogTab):
             if not data or not isinstance(data, list):
                 err = "data is not a list"; break
 
-            # Get time of last written entry
-            last_time = self._meta["time-last"] if self._meta else 0
+            # Get backlog config
+            time_first = time_last = backlog_size = 0
+            if self._meta:
+                time_first = self._meta["time-first"]
+                time_last = self._meta["time-last"]
+                backlog_size = self._meta["size"]
 
             # Parse all data entries
             data_str = None
@@ -351,10 +355,13 @@ class Backlog(LogTab):
                 if not isinstance(time, int):
                     err = "time is not an integer"; break
 
-                if time <= last_time:
+                if time <= time_last:
                     err = "time does not increase :: time=" + str(time) + \
-                                                   " last_time=" + str(last_time); break
-                last_time = time
+                                                   " time_last=" + str(time_last); break
+                time_last = time
+
+                if time_first == 0:
+                    time_first = time
 
                 # Convert entry to string
                 if not data_str:
@@ -375,10 +382,8 @@ class Backlog(LogTab):
                 err = "write error"; break
 
             # Update meta
-            self._meta = self.UpdateMeta(
-              self._meta["time-first"] if self._meta else time,
-              time,
-              self._meta["size"] + 1 if self._meta else 1)
+            self._meta = self.UpdateMeta(time_first, time_last,
+              backlog_size + len(data))
 
             break # while
         if err:
@@ -859,6 +864,7 @@ class ActionHttpClient(Action):
 
 #---------------------------------------------------------------------------------------------------
 def RunAction(args, allowed=None):
+    action = None
     err = None
     while True:
         # Sanity check arguments
