@@ -12,6 +12,16 @@ ACTION_HEADER=`printf '>%.0s' {1..80}`
 
 piot_data=""
 
+function json_read_key {
+    local json=$1
+    local key=$2
+    local default_value=$3
+    local value="$(echo $json | jq -c .\"$key\")"
+    [ $? -ne 0 ] && value=$default_value
+    [ "x$value" == "xnull" ] && value=$default_value
+    echo $value
+}
+
 function log_param {
     local name=$1
     local value=$2
@@ -20,9 +30,9 @@ function log_param {
     # Ignore empty values
     [ "x$value" == "xnull" ] && return
 
-    # Limit value size
+    # Truncate value
     [ ${#value} -gt $limit ] && suffix=" ...<truncated>\n" || suffix="\n"
-    printf "    >> %-10s = %.*s $suffix" "$name" $limit "$value"
+    printf "    >> %-15s = %.*s $suffix" "$name" $limit "$value"
 }
 
 function prepare_action {
@@ -34,16 +44,18 @@ function prepare_action {
 function process_action {
     local out=$1
     local rc=$2
-    local success=`echo $out | jq .success`
-    local error=`echo $out | jq .error`
+    local success=$(json_read_key "$out" "success" "false")
+    local error=$(json_read_key "$out" "error" "null")
 
-    # Save .out in global variable
-    piot_data=`echo $out | jq -c .out`
+    # Save "out" in global variable
+    piot_data=$(json_read_key "$out" "out" "{}")
 
     # Log generic parameters
-    log_param "data" "$piot_data"
-    log_param "success" "$success:$rc"
+    log_param "success" "$success"
+    [ $rc -ne 0 ] &&
+      log_param "rc" "$rc"
     log_param "error" "$error"
+    log_param "data" "$piot_data"
 
     # Early exit if failed
     [ "x$success" != "xtrue" ] && exit 42
@@ -64,9 +76,14 @@ function main {
     prepare_action "Reading backlog :: name=$SENSOR_NAME"
     out=`$PIOT --action=backlog-read --sensor-name=$SENSOR_NAME`
     process_action "$out" $?
-    backlog_data=`echo $piot_data | jq -c .data`
-    log_param "age" "$(echo $piot_data | jq .age)"
-    log_param "size" "$(echo $piot_data | jq .size)"
+    backlog_data=$(json_read_key "$piot_data" "data" "[]")
+    backlog_size=$(json_read_key "$piot_data" "size" 0)
+    time_cur=$(json_read_key "$piot_data" "time-cur" 0)
+    time_first=$(json_read_key "$piot_data" "time-first" 0)
+    time_last=$(json_read_key "$piot_data" "time-last" 0)
+    log_param "age-first" "$(($time_cur - $time_first))"
+    log_param "age-last" "$(($time_cur - $time_last))"
+    log_param "backlog-size" "$backlog_size"
 
     # Send "backlog-write" request to server
     prepare_action "Sending backlog to server :: addr=$SERVER_PROTO://$SERVER_ADDR:$SERVER_PORT"
@@ -77,11 +94,11 @@ function main {
                                     --addr=$SERVER_ADDR \
                                     --port=$SERVER_PORT \
                                     --auth-token=$SERVER_AUTH_TOKEN \
-                                    --data="$data"`; rc=$?
+                                    --data="$data"`
     process_action "$out" $?
 
     # Verify whether "backlog-write" succeeded on server
-    prepare_action "Checking whether backlog was written on server"
+    prepare_action "Checking whether backlog was successfully written on server"
     process_action "$piot_data" $?
 
     # Clear local backlog after successfully uploading it to server

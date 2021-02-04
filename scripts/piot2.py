@@ -24,6 +24,7 @@ SECONDS = { "s" : 1,
             "w" : 60 * 60 * 24 * 7,
             "M" : None,
             "y" : None}
+DB_VERSION = 1
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
@@ -428,7 +429,7 @@ class Backlog(LogTab):
 
     def WriteMeta(self, time_first, time_last, size):
         data = OrderedDict({            \
-            "time-first" : time_first,  \
+            "time-first" : time_first,
             "time-last"  : time_last,
             "size"       : size})
         Utils.WriteFile(self._meta_path, Utils.JsonToStr(data), True)
@@ -479,9 +480,83 @@ class Backlog(LogTab):
     def GetStatus(self):
         status = None
         if self._meta:
-            return OrderedDict({"age"  : self._meta["time-last"] - self._meta["time-first"], \
-                                "size" : self._meta["size"]})
+            return OrderedDict({"size" : self._meta["size"],
+                                "time-cur" : Utils.GetUnixTimestamp(),
+                                "time-first" : self._meta["time-first"],
+                                "time-last" : self._meta["time-last"]})
         return status
+
+#---------------------------------------------------------------------------------------------------
+class Db(LogTab):
+    def __init__(self, path):
+        import sqlite3
+
+        super(Db, self).__init__()
+        self._path = path
+        self._connection = None
+
+    def HandleException(self, description):
+        return description + " :: ex=" + str(sys.exc_info()[0]) + ", " + \
+                                         str(sys.exc_info()[1])
+
+    def Open(self):
+        err = None
+        try:
+            self._connection = sqlite3.connect(self._path)
+        except:
+            err = self.HandleException("connect error")
+        return not err
+
+    def InitDb(self, admin_token, version=DB_VERSION):
+        import sqlite3
+
+        err = None
+        con = None
+        cur = None
+        while True:
+            try:
+                con = sqlite3.connect(self._path)
+            except:
+                err = self.HandleException("connect error :: ex="); break
+
+            try:
+                cur = con.cursor()
+            except:
+                err = "cursor error :: ex=" + str(sys.exc_info()[1]); break
+
+            try:
+                cur.execute('''CREATE TABLE users
+                             (name text, token text, active integer)''')
+            except:
+                err = "create table error :: ex=" + str(sys.exc_info()[1]); break
+
+            try:
+                cur.execute("INSERT INTO users VALUES ('admin','?','1')", (admin_token,))
+            except:
+                err = "insert admin error :: ex=" + str(sys.exc_info()[1]); break
+
+            try:
+                con.commit()
+            except:
+                err = "commit error :: ex=" + str(sys.exc_info()[1]); break
+
+            break # while
+        if err:
+            self.LogErr("Failed to initialize db :: " + err + " :: path=" + self._path)
+
+        # Cleanup
+        if cur:
+            cur.close()
+        if con:
+            con.close()
+
+        return not err
+
+    def Create(self):
+        pass
+
+    def Write(self, sensor_name, data):
+        pass
 
 #---------------------------------------------------------------------------------------------------
 class CmdResult(LogTab):
@@ -619,12 +694,23 @@ class ActionError(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDbCreate(Action):
-    def __init__(self, auth_token):
-        super(ActionDbCreate, self).__init__("db-create", log_tab, 
-          OrderedDict({"auth-token":auth_token}))
+    def __init__(self, path, auth_token):
+        self._path = path
+        self._auth_token = auth_token
+        super(ActionDbCreate, self).__init__("db-create",
+          OrderedDict({"path":path, "auth-token":auth_token}))
 
     def Run(self):
-        pass
+        err = None
+        while True:
+            # Create db
+            db = Db(self._path)
+            if not db.InitDb(self._auth_token):
+                err = "init failed"; break
+
+            break # while
+        if err:
+            self.SetErr("Failed to create db :: " + err)
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogWrite(Action):
@@ -885,13 +971,13 @@ def RunAction(args, allowed=None):
         # DB
         #-------------------------------------------------------------------------------------------
         # db-init
-        if name == "db-init":
-#            action = ActionDbInit(
-#                args.get("auth-token"))
-            pass
+        if name == "db-create":
+            action = ActionDbCreate(
+                args.get("path"),
+                args.get("auth-token"))
 
         # db-sensor-init
-        elif name == "db-sensor-init":
+        elif name == "db-sensor-create":
 #            action = ActionDbSensorInit(
 #                args.get("auth-token"),
 #                args.get("sensor-name"),
@@ -994,6 +1080,8 @@ if __name__ == "__main__":
         help='Type of the sensor')
     parser.add_argument('--data', action='store', 
         help='Data in JSON format')
+    parser.add_argument('--path', action='store', 
+        help='Path in filesystem')
     parser.add_argument('--range-from', action='store', default="now-6d", 
         help='Beginning of time range')
     parser.add_argument('--range-to', action='store', default="now", 
