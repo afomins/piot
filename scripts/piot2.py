@@ -489,74 +489,136 @@ class Backlog(LogTab):
 #---------------------------------------------------------------------------------------------------
 class Db(LogTab):
     def __init__(self, path):
-        import sqlite3
-
         super(Db, self).__init__()
         self._path = path
         self._connection = None
+        self._cursor = None
 
-    def HandleException(self, description):
+    def ReadException(self, description):
         return description + " :: ex=" + str(sys.exc_info()[0]) + ", " + \
                                          str(sys.exc_info()[1])
 
-    def Open(self):
+    def OpenDb(self):
+        import sqlite3
+
         err = None
-        try:
-            self._connection = sqlite3.connect(self._path)
-        except:
-            err = self.HandleException("connect error")
+        while True:
+            # Initiate connection
+            try:
+                self._connection = sqlite3.connect(self._path)
+            except:
+                err = self.ReadException("connect error"); break
+
+            # Create cursor
+            try:
+                self._cursor = self._connection.cursor()
+            except:
+                err = self.ReadException("cursor error"); break
+
+            break # while # 
+        if err:
+            self.LogErr("Failed to open db :: " + err + " :: path=" + self._path)
+            self.Close(True)
         return not err
 
-    def InitDb(self, admin_token, version=DB_VERSION):
+
+    def CloseDb(self, silent=False):
+        import sqlite3
+
+        # Close cursor
+        err = None
+        try:
+            self._cursor.close()
+        except:
+            err = True
+            if not silent:
+                self.LogErr("Failed to close db :: " + self.ReadException("cursor error"))
+
+        # Close connection
+        try:
+            self._connection.close()
+        except:
+            err = True
+            if not silent:
+                self.LogErr("Failed to close db :: " + self.ReadException("connection error"))
+        return not err
+
+    def CommitDb(self):
+        import sqlite3
+
+        err = None
+        try:
+            self._connection.commit()
+        except:
+            err = self.ReadException("commit error")
+
+        if err:
+            self.LogErr("Failed to commit changes :: " + err)
+        return not err
+
+    def InitDb(self, admin_token):
         import sqlite3
 
         err = None
         con = None
         cur = None
         while True:
-            try:
-                con = sqlite3.connect(self._path)
-            except:
-                err = self.HandleException("connect error :: ex="); break
+            # Create "users" table
+            if not self.CreateTable("users", "name text, token text, active integer"):
+                err = "create users error"; break
 
-            try:
-                cur = con.cursor()
-            except:
-                err = "cursor error :: ex=" + str(sys.exc_info()[1]); break
+            # Write admin user
+            if not self.WriteTable("users", ("admin", admin_token, 1)):
+                err = "write users error"; break
 
-            try:
-                cur.execute('''CREATE TABLE users
-                             (name text, token text, active integer)''')
-            except:
-                err = "create table error :: ex=" + str(sys.exc_info()[1]); break
-
-            try:
-                cur.execute("INSERT INTO users VALUES ('admin','?','1')", (admin_token,))
-            except:
-                err = "insert admin error :: ex=" + str(sys.exc_info()[1]); break
-
-            try:
-                con.commit()
-            except:
-                err = "commit error :: ex=" + str(sys.exc_info()[1]); break
+            # commit changes
+            if not self.CommitDb():
+                err = "commit error"; break
 
             break # while
         if err:
-            self.LogErr("Failed to initialize db :: " + err + " :: path=" + self._path)
-
-        # Cleanup
-        if cur:
-            cur.close()
-        if con:
-            con.close()
-
+            self.LogErr("Failed to init db :: " + err + " :: path=" + self._path)
+            self.Close(True)
+            Utils.DelFile(self._path)
         return not err
 
-    def Create(self):
-        pass
+    def CreateTable(self, name, scheme):
+        import sqlite3
 
-    def Write(self, sensor_name, data):
-        pass
+        err = None
+        sql = "CREATE TABLE " + name + " (" + scheme + ")"
+        try:
+            self._cursor.execute(sql)
+        except:
+            err = self.HandleException("create table error")
+
+        if err:
+            self.LogErr("Failed to create table :: " + err + " :: sql=" + sql)
+        return not err
+
+    def WriteTable(self, name, data):
+        import sqlite3
+
+        err = None
+        while True:
+            # Data must be passed as tuple
+            if not isinstance(data, tuple) or len(data) == 0:
+                err = "bad data"; break
+
+            # Insert into table
+            scheme = ("?," * len(data))[:-1]
+            sql = "INSERT INTO " + name + " VALUES (" + scheme + ")"
+            try:
+                self._cursor.execute(sql, data)
+            except:
+                err = self.HandleException("create table error")
+
+            break # while
+        if err:
+            self.LogErr("Failed to write into table :: " + err +
+                                                  " :: sql=" + sql +
+                                                     " data=" + str(data))
+        return not err
 
 #---------------------------------------------------------------------------------------------------
 class CmdResult(LogTab):
@@ -703,10 +765,23 @@ class ActionDbCreate(Action):
     def Run(self):
         err = None
         while True:
-            # Create db
+            # Do not overwrite old db
+            if Utils.IsFilePresent(self._path):
+                err = "already exists"; break
+
+            # Open db
+            LogTab.PushLogTab(self)
             db = Db(self._path)
+            if not db.OpenDb():
+                err = "open failed"; break
+
+            # Initialize db
             if not db.InitDb(self._auth_token):
                 err = "init failed"; break
+
+            # Close db
+            if not db.CloseDb():
+                err = "close failed"; break
 
             break # while
         if err:
