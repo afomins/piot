@@ -223,6 +223,15 @@ class Utils:
         except:
             return 0
 
+    def Try(cb, error_desc):
+        err = None
+        try:
+            cb()
+        except:
+            err = error_desc + " :: ex0=" + str(sys.exc_info()[0]) + \
+                                 ", ex1=" + str(sys.exc_info()[1])
+        return err
+
 #---------------------------------------------------------------------------------------------------
 class Writer:
     def __init__(self, stream):
@@ -494,74 +503,66 @@ class Db(LogTab):
         self._connection = None
         self._cursor = None
 
-    def ReadException(self, description):
-        return description + " :: ex=" + str(sys.exc_info()[0]) + ", " + \
-                                         str(sys.exc_info()[1])
-
-    def OpenDb(self):
+    def OpenDb(self, create_if_missing):
         import sqlite3
 
         err = None
         while True:
+            # Make sure that file is present
+            if not create_if_missing and not Utils.IsFilePresent(self._path):
+                err = "already exists"; break
+
             # Initiate connection
-            try:
+            def cb():
                 self._connection = sqlite3.connect(self._path)
-            except:
-                err = self.ReadException("connect error"); break
+            err = Utils.Try(cb, "connect error");
+            if err: break
 
             # Create cursor
-            try:
+            def cb():
                 self._cursor = self._connection.cursor()
-            except:
-                err = self.ReadException("cursor error"); break
+            err = Utils.Try(cb, "cursor error");
+            if err: break
 
-            break # while # 
+            break # while
         if err:
-            self.LogErr("Failed to open db :: " + err + " :: path=" + self._path)
-            self.Close(True)
+            self.LogErr("Failed to open db :: " + err)
+            self.CloseDb(True)
         return not err
-
 
     def CloseDb(self, silent=False):
         import sqlite3
 
         # Close cursor
         err = None
-        try:
+        def cb():
             self._cursor.close()
-        except:
-            err = True
-            if not silent:
-                self.LogErr("Failed to close db :: " + self.ReadException("cursor error"))
+        err = Utils.Try(cb, "cursor error");
+        if err and not silent:
+            self.LogErr("Failed to close db :: " + err)
 
         # Close connection
-        try:
+        def cb():
             self._connection.close()
-        except:
-            err = True
-            if not silent:
-                self.LogErr("Failed to close db :: " + self.ReadException("connection error"))
+        err = Utils.Try(cb, "connection error");
+        if err and not silent:
+            self.LogErr("Failed to close db :: " + err)
         return not err
 
     def CommitDb(self):
         import sqlite3
 
         err = None
-        try:
+        def cb():
             self._connection.commit()
-        except:
-            err = self.ReadException("commit error")
+        err = Utils.Try(cb, "commit error");
 
         if err:
             self.LogErr("Failed to commit changes :: " + err)
         return not err
 
     def InitDb(self, admin_token):
-        import sqlite3
-
         err = None
-        con = None
-        cur = None
         while True:
             # Create "users" table
             if not self.CreateTable("users", "name text, token text, active integer"):
@@ -571,15 +572,31 @@ class Db(LogTab):
             if not self.WriteTable("users", ("admin", admin_token, 1)):
                 err = "write users error"; break
 
+            # Create "sensors" table
+            if not self.CreateTable("sensors", "name text, type text, owner integer"):
+                err = "create sensors error"; break
+
             # commit changes
             if not self.CommitDb():
                 err = "commit error"; break
 
             break # while
         if err:
-            self.LogErr("Failed to init db :: " + err + " :: path=" + self._path)
-            self.Close(True)
+            self.LogErr("Failed to init db :: " + err)
+            self.CloseDb(True)
             Utils.DelFile(self._path)
+        return not err
+
+    def InitSensor(self, sensor_name, sensor_type, owner):
+        err = None
+        while True:
+            # Write sensor
+            if not self.WriteTable("sensors", (sensor_name, sensor_type, owner)):
+                err = "write sensor error"; break
+
+            break # while
+        if err:
+            self.LogErr("Failed to init sensor :: " + err)
         return not err
 
     def CreateTable(self, name, scheme):
@@ -587,13 +604,12 @@ class Db(LogTab):
 
         err = None
         sql = "CREATE TABLE " + name + " (" + scheme + ")"
-        try:
+        def cb():
             self._cursor.execute(sql)
-        except:
-            err = self.HandleException("create table error")
+        err = Utils.Try(cb, "cursor error");
 
         if err:
-            self.LogErr("Failed to create table :: " + err + " :: sql=" + sql)
+            self.LogErr("Failed to create table :: " + err + ", sql=" + sql)
         return not err
 
     def WriteTable(self, name, data):
@@ -605,19 +621,18 @@ class Db(LogTab):
             if not isinstance(data, tuple) or len(data) == 0:
                 err = "bad data"; break
 
-            # Insert into table
+            # Insert table
             scheme = ("?," * len(data))[:-1]
             sql = "INSERT INTO " + name + " VALUES (" + scheme + ")"
-            try:
+            def cb():
                 self._cursor.execute(sql, data)
-            except:
-                err = self.HandleException("create table error")
+            err = Utils.Try(cb, "cursor error");
 
             break # while
         if err:
-            self.LogErr("Failed to write into table :: " + err +
-                                                  " :: sql=" + sql +
-                                                     " data=" + str(data))
+            self.LogErr("Failed to write table :: " + err +
+                                               ", sql=" + sql +
+                                               ", data=" + str(data))
         return not err
 
 #---------------------------------------------------------------------------------------------------
@@ -772,7 +787,7 @@ class ActionDbCreate(Action):
             # Open db
             LogTab.PushLogTab(self)
             db = Db(self._path)
-            if not db.OpenDb():
+            if not db.OpenDb(True):
                 err = "open failed"; break
 
             # Initialize db
@@ -786,6 +801,34 @@ class ActionDbCreate(Action):
             break # while
         if err:
             self.SetErr("Failed to create db :: " + err)
+
+#---------------------------------------------------------------------------------------------------
+class ActionDbSensorCreate(Action):
+    def __init__(self, path, auth_token, sensor_name, sensor_type):
+        self._path = path
+        self._auth_token = auth_token
+        self._sensor_name = sensor_name
+        self._sensor_type = sensor_type
+        super(ActionDbCreate, self).__init__("db-sensor-create",
+          OrderedDict({"path":path, "auth-token":auth_token, 
+                       "sensor-name":sensor_name, "sensor_type":sensor_type}))
+
+    def Run(self):
+        err = None
+        while True:
+            # Open db
+            LogTab.PushLogTab(self)
+            db = Db(self._path)
+            if not db.OpenDb(False):
+                err = "open failed"; break
+
+            # Close db
+            if not db.CloseDb():
+                err = "close failed"; break
+
+            break # while
+        if err:
+            self.SetErr("Failed to create sensor :: " + err)
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogWrite(Action):
@@ -1053,10 +1096,11 @@ def RunAction(args, allowed=None):
 
         # db-sensor-init
         elif name == "db-sensor-create":
-#            action = ActionDbSensorInit(
-#                args.get("auth-token"),
-#                args.get("sensor-name"),
-#                args.get("sensor-type"))
+            action = ActionDbSensorCreate(
+                args.get("path"),
+                args.get("auth-token"),
+                args.get("sensor-name"),
+                args.get("sensor-type"))
             pass
 
         # db-sensor-write
