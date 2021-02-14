@@ -504,15 +504,16 @@ class Db(LogTab):
         self._cursor = None
         self._dirty = False
 
-    def LogMethod(self, method, err, args=None):
-        line = "DB "
-        if err:
-            line += "FAILED :: " + err + " "
-        line += ":: method=" + method
+    def Log(self, method, err, args=None):
+        line = "DB :: " + method
+        if args or err:
+            line += " :: "
+
         if args:
-            line += ", " + args
+            line += args
 
         if err:
+            line += " err=" + err
             self.LogErr(line)
         else:
             self.LogDbg(line)
@@ -534,7 +535,7 @@ class Db(LogTab):
             err = Utils.Try(cb, "cursor error");
             break # while
 
-        self.LogMethod("open", err, "path=" + self._path)
+        self.Log("open", err, "path=" + self._path)
         if err:
             self.Close(True)
         return not err
@@ -559,7 +560,7 @@ class Db(LogTab):
 
         # Log
         if not silent:
-            self.LogMethod("close", err)
+            self.Log("close", err)
         return not err
 
     def Commit(self):
@@ -576,7 +577,7 @@ class Db(LogTab):
             self._dirty = False
 
         # Log
-        self.LogMethod("commit", err)
+        self.Log("commit", err)
         return not err
 
     def CreateTable(self, name, scheme):
@@ -592,7 +593,7 @@ class Db(LogTab):
         self._dirty = True
 
         # Log
-        self.LogMethod("create-table", err, "sql=" + sql)
+        self.Log("create-table", err, "sql=" + sql)
         return not err
 
     def WriteRow(self, name, data):
@@ -616,7 +617,7 @@ class Db(LogTab):
             break # while
 
         # Log
-        self.LogMethod("write-row", err, "sql=" + sql + " sql-params=" + str(data))
+        self.Log("write-row", err, "sql=" + sql + " sql-params=" + str(data))
         return not err
 
     def ReadRow(self, name, query):
@@ -643,7 +644,7 @@ class Db(LogTab):
             err = Utils.Try(cb, "fetchone error");
             break # while
 
-        self.LogMethod("read-row", err, "sql=" + sql + " query=" + str(query))
+        self.Log("read-row", err, "sql=" + sql + " query=" + str(query))
         return row
 
     def GetTableSize(self, name):
@@ -677,7 +678,7 @@ class Db(LogTab):
                 err = "not an integer"
             break # while
 
-        self.LogMethod("get-table-size", err, "sql=" + sql)
+        self.Log("get-table-size", err, "sql=" + sql)
         return row_size
 
 #---------------------------------------------------------------------------------------------------
@@ -849,16 +850,16 @@ class ActionDb(Action):
     def Prepare(self):
         # Call parent
         Action.Prepare(self)
+        if not self.Ok():
+            return
+
+        # Create db object
+        LogTab.PushLogTab(self)
+        self._db = Db(self._path)
 
         # Connect to db and authenticate user
         err = None
         while True:
-            if not self.Ok():
-                break
-
-            # Create db object
-            self._db = Db(self._path)
-
             # Make sure that file is present when referencing existing db
             create_new = (self._cmd == "db-create")
             if create_new and Utils.IsFilePresent(self._path):
@@ -1051,9 +1052,25 @@ class ActionDbSensorWrite(ActionDb):
             self.SetErr("Failed to write sensor :: " + err)
 
 #---------------------------------------------------------------------------------------------------
-class ActionBacklogWrite(Action):
+class ActionBacklog(Action):
+    def __init__(self, cmd, args):
+        self._sensor_name = args["sensor-name"]
+        self._backlog = None
+        super(ActionBacklog, self).__init__(cmd, args)
+
+    def Prepare(self):
+        # Call parent
+        Action.Prepare(self)
+        if not self.Ok():
+            return
+
+        # Create backlog
+        LogTab.PushLogTab(self)
+        self._backlog = Backlog(self._sensor_name)
+
+#---------------------------------------------------------------------------------------------------
+class ActionBacklogWrite(ActionBacklog):
     def __init__(self, sensor_name, data):
-        self._sensor_name = sensor_name
         self._data = data
         super(ActionBacklogWrite, self).__init__("backlog-write",
           OrderedDict({"sensor-name":sensor_name, "data":data}))
@@ -1062,13 +1079,11 @@ class ActionBacklogWrite(Action):
         err = None
         while True:
             # Write to backlog
-            LogTab.PushLogTab(self)
-            backlog = Backlog(self._sensor_name)
-            if not backlog.Write(self._data):
+            if not self._backlog.Write(self._data):
                 err = "write error"; break
 
             # Set status
-            if not self.SetOut(backlog.GetStatus()):
+            if not self.SetOut(self._backlog.GetStatus()):
                 err = "no status"; break
 
             break # while
@@ -1076,9 +1091,8 @@ class ActionBacklogWrite(Action):
             self.SetErr("Failed to write backlog :: " + err);
 
 #---------------------------------------------------------------------------------------------------
-class ActionBacklogClear(Action):
+class ActionBacklogClear(ActionBacklog):
     def __init__(self, sensor_name):
-        self._sensor_name = sensor_name
         super(ActionBacklogClear, self).__init__("backlog-clear",
           OrderedDict({"sensor-name":sensor_name}))
 
@@ -1086,13 +1100,11 @@ class ActionBacklogClear(Action):
         err = None
         while True:
             # Clear to backlog
-            LogTab.PushLogTab(self)
-            backlog = Backlog(self._sensor_name)
-            if not backlog.Clear():
+            if not self._backlog.Clear():
                 err = "clear error"; break
 
             # Set status
-            if not self.SetOut(backlog.GetStatus()):
+            if not self.SetOut(self._backlog.GetStatus()):
                 err = "no status"; break
 
             break # while
@@ -1100,9 +1112,8 @@ class ActionBacklogClear(Action):
             self.SetErr("Failed to clear backlog :: " + err)
 
 #---------------------------------------------------------------------------------------------------
-class ActionBacklogRead(Action):
+class ActionBacklogRead(ActionBacklog):
     def __init__(self, sensor_name):
-        self._sensor_name = sensor_name
         super(ActionBacklogRead, self).__init__("backlog-read",
           OrderedDict({"sensor-name":sensor_name}))
 
@@ -1110,12 +1121,12 @@ class ActionBacklogRead(Action):
         err = None
         while True:
             # Read backlog
-            LogTab.PushLogTab(self)
-            backlog = Backlog(self._sensor_name)
-            data = backlog.Read()
+            data = self._backlog.Read()
+            if not data:
+                err = "no data"; break
 
             # Set status
-            status = backlog.GetStatus()
+            status = self._backlog.GetStatus()
             if not status:
                 err = "no status"; break
 
