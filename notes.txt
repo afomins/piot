@@ -21,3 +21,11 @@ Start piot server:
 
 Read piot server:
     ~/git/piot/scripts/piot.py --action=http-client-db-read --addr=localhost --db-name=test --auth-token=aaa --filter=.[0:4]| jq
+
+    
+    
+    
+~/git/piot/scripts/piot2.py --action=db-create --path=dummy3.sqlite --auth-token=qwerty | jq
+~/git/piot/scripts/piot2.py --action=db-sensor-create --path=dummy3.sqlite --auth-token=qwerty --sensor-name=br1 --sensor-type=temperature| jq
+~/git/piot/scripts/piot2.py --action=db-sensor-write --path=dummy3.sqlite --auth-token=qwerty --sensor-name=br2 --data="[{\"time\":3, \"value\":48.0}, {\"time\":30, \"value\":480.0}]"| jq
+
