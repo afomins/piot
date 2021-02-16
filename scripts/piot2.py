@@ -13,18 +13,11 @@ import socket
 import random
 import re
 from collections import OrderedDict
+from _socket import close
 
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot2"
 LOG_FILE = "/tmp/" + APP_NAME + ".log"
-SECONDS = { "s" : 1, 
-            "m" : 60, 
-            "h" : 60 * 60,
-            "d" : 60 * 60 * 24,
-            "w" : 60 * 60 * 24 * 7,
-            "M" : None,
-            "y" : None}
-DB_VERSION = 1
 
 #---------------------------------------------------------------------------------------------------
 class Utils:
@@ -41,104 +34,6 @@ class Utils:
 
     def GetTimestamp():
         return time.time()
-
-    def GetTimestampFromString(val, fmt="%Y-%m-%dT%H:%M:%S.%fZ"):
-        try:
-            dt = datetime.datetime.strptime(val, fmt)
-            ts = datetime.datetime.timestamp(dt)
-            return ts
-        except:
-            return None
-
-    def GetStringFromTimestamp(val, fmt="%Y-%m-%dT%H:%M:%S.%fZ"):
-        try:
-            return datetime.datetime.fromtimestamp(val).strftime(fmt)
-        except:
-            return "error"
-
-    def GetTimestampFromTimedef(timedef, now_ts=None):
-        #0 - base
-        #1 - offset
-        #2 - offset direction
-        #3 - offset value
-        #4 - offset unit
-        #6 - full period
-        #7 - full period unit
-        p = "(\w+)"                 + \
-            "("                     + \
-                 "(\+|\-)"          + \
-                 "([0-9]+)"         + \
-                 "(s|m|h|d|w|M|y)"  + \
-            ")?"                    + \
-            "("                     + \
-                 "\/"               + \
-                 "(s|m|h|d|w|M|y)"  + \
-            ")?"
-
-        # Get current time
-        dt = datetime.datetime.now() if now_ts == None \
-            else datetime.datetime.fromtimestamp(now_ts)
-
-        # Go!
-        ts = None
-        err = None
-        match = re.fullmatch(p, timedef)
-        while True:
-            if not match:
-                err = "no match"; break
-
-            groups = match.groups()
-            if len(groups) != 7:
-                err = "wrong groups"; break
-
-            # Base
-            base = groups[0]
-            if base != "now":
-                err = "bad base"; break
-
-            # Offset
-            if groups[1]:
-                # Direction
-                off_dir = +1 if groups[2] == "+" \
-                    else -1
-
-                # Value
-                off_value = Utils.StrToInt(groups[3])
-
-                # Unit
-                off_unit = groups[4]
-                if off_unit not in SECONDS:
-                    err = "bad unit"; break
-
-                # Process time offset that is expressed in seconds (s|m|h|d|w)
-                secs = SECONDS[off_unit]
-                if secs:
-                    delta = datetime.timedelta(seconds = off_value * secs)
-                    dt = dt + delta if (off_dir > 0) \
-                        else dt - delta
-
-                # Process variable size time offset (M|y)
-                else:
-                    if off_unit == "M":
-                        dt = dt.replace(                                    \
-                            year = dt.year + off_dir * int(off_value / 12), \
-                            month = dt.month + off_dir * (off_value % 12))
-
-                    elif off_unit == "y":
-                        dt = dt.replace(                                    \
-                            year = dt.year + off_dir * off_value)
-
-                    else:
-                        dt = None
-
-            # Convert datetime to timestamp
-            if dt:
-                ts = datetime.datetime.timestamp(dt)
-
-            break # while
-        if err:
-            log.Err("Timedef parsing failed, " + err + " :: val=" + timedef)
-        return ts
 
     def IsDirPresent(path):
         return os.path.isdir(path)
@@ -303,16 +198,17 @@ class LogTab:
 class Backlog(LogTab):
     DATA_EXTENSION = ".piot2"
     META_EXTENSION = ".piot2.meta"
+    LOCK_EXTENSION = ".piot2.lock"
+    LOCK_TIMEOUT = 5
 
-    dir = "backlog"
-    def InitDir(suffix):
-        Backlog.dir = "backlog-" + suffix
-
-    def __init__(self, name):
+    def __init__(self, dir, name):
         super(Backlog, self).__init__()
+        self._dir = dir
         self._name = name
-        self._data_path = Backlog.dir + "/" + name + Backlog.DATA_EXTENSION
-        self._meta_path = Backlog.dir + "/" + name + Backlog.META_EXTENSION
+        self._lock = None
+        self._data_path = self._dir + "/" + name + Backlog.DATA_EXTENSION
+        self._meta_path = self._dir + "/" + name + Backlog.META_EXTENSION
+        self._lock_path = self._dir + "/" + name + Backlog.LOCK_EXTENSION
 
         # Validate data & meta
         data_exists = Utils.IsFilePresent(self._data_path)
@@ -324,7 +220,7 @@ class Backlog(LogTab):
         elif meta_exists and not data_exists:
             # TODO: clear meta
             pass
-        
+
         elif not meta_exists and data_exists:
             # TODO: Rebuild meta
             pass
@@ -383,8 +279,8 @@ class Backlog(LogTab):
             if err: break
 
             # Create backlog dir
-            if not Utils.IsDirPresent(Backlog.dir) and \
-               not Utils.CreateDir(Backlog.dir):
+            if not Utils.IsDirPresent(self._dir) and \
+               not Utils.CreateDir(self._dir):
                 err = "no dir"; break
 
             # Write data
@@ -435,6 +331,43 @@ class Backlog(LogTab):
         if err:
             self.LogErr("Faild to clear backlog :: err=" + err + " path=" + path)
         return not err
+
+    def Lock(self, timeout=Backlog.LOCK_TIMEOUT):
+        # Create lock file if missing
+        path = self._lock_path
+        if not Utils.IsFilePresent(path):
+            Utils.WriteFile(path, "", True)
+
+        # Try lock until timeout expires
+        wait_stop = Utils.GetUnixTimestamp() + timeout
+        err = None
+        while True:
+            # Try lock
+            try:
+                self._lock = open(path, "r")
+                fcntl.flock(self._lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                # Success
+                break
+            except:
+                pass
+
+            # Stop trying if timeout is over
+            if Utils.GetUnixTimestamp() > wait_stop:
+                Unlock()
+                err = "failed to acquire lock"; break
+
+            # Wait and try again later
+            time.sleep(0.1)
+
+        if err:
+            self.LogErr("Lock error :: " + err + " :: lock-path=" + path)
+        return not err
+
+    def Unlock(self):
+        if self._lock:
+            close(self._lock)
+            self._lock = None
 
     def WriteMeta(self, time_first, time_last, size):
         data = OrderedDict({            \
@@ -1054,6 +987,7 @@ class ActionDbSensorWrite(ActionDb):
 #---------------------------------------------------------------------------------------------------
 class ActionBacklog(Action):
     def __init__(self, cmd, args):
+        self._backlog_dir = args["backlog-dir"]
         self._sensor_name = args["sensor-name"]
         self._backlog = None
         super(ActionBacklog, self).__init__(cmd, args)
@@ -1066,14 +1000,14 @@ class ActionBacklog(Action):
 
         # Create backlog
         LogTab.PushLogTab(self)
-        self._backlog = Backlog(self._sensor_name)
+        self._backlog = Backlog(self._backlog_dir, self._sensor_name)
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogWrite(ActionBacklog):
-    def __init__(self, sensor_name, data):
+    def __init__(self, backlog_dir, sensor_name, data):
         self._data = data
         super(ActionBacklogWrite, self).__init__("backlog-write",
-          OrderedDict({"sensor-name":sensor_name, "data":data}))
+          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name, "data":data}))
 
     def Run(self):
         err = None
@@ -1092,9 +1026,9 @@ class ActionBacklogWrite(ActionBacklog):
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogClear(ActionBacklog):
-    def __init__(self, sensor_name):
+    def __init__(self, backlog_dir, sensor_name):
         super(ActionBacklogClear, self).__init__("backlog-clear",
-          OrderedDict({"sensor-name":sensor_name}))
+          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name}))
 
     def Run(self):
         err = None
@@ -1113,9 +1047,9 @@ class ActionBacklogClear(ActionBacklog):
 
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogRead(ActionBacklog):
-    def __init__(self, sensor_name):
+    def __init__(self, backlog_dir, sensor_name):
         super(ActionBacklogRead, self).__init__("backlog-read",
-          OrderedDict({"sensor-name":sensor_name}))
+          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name}))
 
     def Run(self):
         err = None
@@ -1378,19 +1312,21 @@ def RunAction(args, allowed=None):
         # backlog-read
         elif name == "backlog-read":
             action = ActionBacklogRead(
+                args.get("backlog-dir"),
                 args.get("sensor-name"));
 
         # backlog-write
         elif name == "backlog-write":
             action = ActionBacklogWrite(
+                args.get("backlog-dir"),
                 args.get("sensor-name"),
                 args.get("data"));
 
         # backlog-clean
         elif name == "backlog-clear":
             action = ActionBacklogClear(
+                args.get("backlog-dir"),
                 args.get("sensor-name"));
-            pass
 
         #-------------------------------------------------------------------------------------------
         # SENSORS
@@ -1432,12 +1368,6 @@ if __name__ == "__main__":
         help='Data in JSON format')
     parser.add_argument('--path', action='store', 
         help='Path in filesystem')
-    parser.add_argument('--range-from', action='store', default="now-6d", 
-        help='Beginning of time range')
-    parser.add_argument('--range-to', action='store', default="now", 
-        help='End of time range')
-    parser.add_argument('--range-size', action='store', type=int, default=32, 
-        help='Maximum number of entries in range')
     parser.add_argument('--proto', action='store', default="http", 
         help='Transport protocol (HTTP or HTTPS)')
     parser.add_argument('--auth-token', action='store', 
@@ -1450,11 +1380,17 @@ if __name__ == "__main__":
         help='Force sensor to report random data instead of reading real values')
     parser.add_argument('--clean-log', action='store_true', 
         help='Clean log file')
+    parser.add_argument('--backlog-dir', action='store', default="backlog-client",
+        help='Location of backlog')
 
-    # Build list arguments
+    # Build dict of arguments
     args = {}
     for key, value in vars(parser.parse_args()).items():
         args[key.replace("_", "-")] = value
+
+    # Override backlog dir when running server
+    if args["action"] == "http-server":
+        args["backlog-dir"] = "backlog-server"
 
     # Init logger writer
     log = Logger("stdout" if args["action"] == "http-server" \
@@ -1464,9 +1400,6 @@ if __name__ == "__main__":
 
     # Init stdout writer
     out = Writer(sys.stdout)
-
-    # Init backlog directory
-    Backlog.InitDir("server" if args["action"] == "http-server" else "client")
 
     # Run action
     action = RunAction(args)
