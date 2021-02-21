@@ -1,0 +1,8 @@
+SENSOR_ID="00000000000"
+SENSOR_NAME="br5-bsmt-temp-heater-in"
+SENSOR_RANDOM="--random"
+
+SERVER_PROTO="http"
+SERVER_ADDR="localhost"
+SERVER_PORT="8000"
+SERVER_AUTH_TOKEN="qwerty"

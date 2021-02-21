@@ -294,7 +294,8 @@ class Backlog(LogTab):
             break # while
         if err:
             self.LogErr("Failed to write backlog :: " + err + " :: path=" + path)
-        return not err
+        return not err, \
+               len(data) if (data and isinstance(data, list)) else 0
 
     def Read(self):
         data_json = None
@@ -332,21 +333,31 @@ class Backlog(LogTab):
             self.LogErr("Faild to clear backlog :: err=" + err + " path=" + path)
         return not err
 
-    def Lock(self, timeout=Backlog.LOCK_TIMEOUT):
+    def Lock(self, timeout=LOCK_TIMEOUT):
+        import fcntl
+
         # Create lock file if missing
         path = self._lock_path
         if not Utils.IsFilePresent(path):
             Utils.WriteFile(path, "", True)
 
         # Try lock until timeout expires
-        wait_stop = Utils.GetUnixTimestamp() + timeout
+        wait_start = Utils.GetUnixTimestamp()
+        wait_stop = wait_start + timeout
+        try_num = 0
         err = None
         while True:
             # Try lock
             try:
-                self._lock = open(path, "r")
+                try_num += 1
+                self._lock = open(path, 'r')
                 fcntl.flock(self._lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+                if try_num > 0:
+                    self.LogDbg("Locking backlog ::" +
+                        " lock-path=" + path +
+                        " try-num=" + str(try_num) +
+                        " wait-time=" + str(Utils.GetUnixTimestamp() - wait_start)) 
                 # Success
                 break
             except:
@@ -354,7 +365,7 @@ class Backlog(LogTab):
 
             # Stop trying if timeout is over
             if Utils.GetUnixTimestamp() > wait_stop:
-                Unlock()
+                self.Unlock()
                 err = "failed to acquire lock"; break
 
             # Wait and try again later
@@ -366,7 +377,8 @@ class Backlog(LogTab):
 
     def Unlock(self):
         if self._lock:
-            close(self._lock)
+            self.LogDbg("Unlocking backlog :: lock-path=" + self._lock_path)
+            self._lock.close()
             self._lock = None
 
     def WriteMeta(self, time_first, time_last, size):
@@ -583,7 +595,7 @@ class Db(LogTab):
     def GetTableSize(self, name):
         import sqlite3
 
-        err = sql = sql_params = row_size = None
+        err = sql = sql_params = row_num = None
         while True:
             # Select from table
             sql = "SELECT COUNT(rowid) FROM " + name
@@ -606,13 +618,13 @@ class Db(LogTab):
 
             # Convert response to int
             try:
-                row_size = int(row[0])
+                row_num = int(row[0])
             except:
                 err = "not an integer"
             break # while
 
         self.Log("get-table-size", err, "sql=" + sql)
-        return row_size
+        return row_num
 
 #---------------------------------------------------------------------------------------------------
 class CmdResult(LogTab):
@@ -743,7 +755,8 @@ class Action(Cmd):
 class ActionError(Action):
     def __init__(self, msg, args):
         self._msg = msg
-        super(ActionError, self).__init__("error", args)
+        self._orig_args = args
+        super(ActionError, self).__init__("error", {})
 
     def Run(self):
         self.SetErr(self._msg)
@@ -769,11 +782,12 @@ class ActionDb(Action):
     def ValidateSensorTemperature(d):
         return d if d and isinstance(d, dict) and len(d) == 2 and           \
                     "time" in d and isinstance(d["time"], int) and          \
-                    "value" in d and isinstance(d["value"], float)          \
+                    "value" in d and (isinstance(d["value"], int) or        \
+                                      isinstance(d["value"], float))        \
                 else None
 
     def __init__(self, cmd, args):
-        self._path = args["path"]
+        self._path = args["db-path"]
         self._auth_token = args["auth-token"]
         self._db = None
         self._user = None
@@ -875,7 +889,7 @@ class ActionDb(Action):
 class ActionDbCreate(ActionDb):
     def __init__(self, path, auth_token):
         super(ActionDbCreate, self).__init__("db-create",
-          OrderedDict({"path":path, "auth-token":auth_token}))
+          OrderedDict({"db-path":path, "auth-token":auth_token}))
 
     def Run(self):
         err = None
@@ -907,7 +921,7 @@ class ActionDbSensorCreate(ActionDb):
         self._sensor_name = sensor_name
         self._sensor_type = sensor_type
         super(ActionDbSensorCreate, self).__init__("db-sensor-create",
-          OrderedDict({"path":path, "auth-token":auth_token, 
+          OrderedDict({"db-path":path, "auth-token":auth_token, 
                        "sensor-name":sensor_name, "sensor-type":sensor_type}))
 
     def Run(self):
@@ -938,7 +952,7 @@ class ActionDbSensorWrite(ActionDb):
         self._sensor_name = sensor_name
         self._data = data
         super(ActionDbSensorWrite, self).__init__("db-sensor-write",
-          OrderedDict({"path":path, "auth-token":auth_token, 
+          OrderedDict({"db-path":path, "auth-token":auth_token, 
                        "sensor-name":sensor_name, "data":data}))
 
     def Run(self):
@@ -962,8 +976,15 @@ class ActionDbSensorWrite(ActionDb):
             if not isinstance(data, list):
                 err = "data is not a list"; break
 
-            # Write data to sensor table row-by-row
+            # Name of the destination table
             dest_table = "sensor_" + str(sensor["id"])
+
+            # Get original size of the table
+            table_size = self._db.GetTableSize(dest_table)
+            if table_size == None:
+                err = "table size error"; break
+
+            # Write data to sensor table row-by-row
             for entry in data:
                 # Write temperature sensor
                 values = None
@@ -979,6 +1000,12 @@ class ActionDbSensorWrite(ActionDb):
                 # Write sensor data
                 if not self._db.WriteRow(dest_table, values):
                     err = "write error"; break
+            if err: break
+
+            # Set out
+            data_written = len(data)
+            self.SetOut(OrderedDict({"size" : data_written + table_size,
+                                     "new-entries" : data_written,}))
 
             break # while
         if err:
@@ -987,7 +1014,7 @@ class ActionDbSensorWrite(ActionDb):
 #---------------------------------------------------------------------------------------------------
 class ActionBacklog(Action):
     def __init__(self, cmd, args):
-        self._backlog_dir = args["backlog-dir"]
+        self._backlog_dir = args["backlog-path"]
         self._sensor_name = args["sensor-name"]
         self._backlog = None
         super(ActionBacklog, self).__init__(cmd, args)
@@ -1002,23 +1029,41 @@ class ActionBacklog(Action):
         LogTab.PushLogTab(self)
         self._backlog = Backlog(self._backlog_dir, self._sensor_name)
 
+        # Acquire lock
+        if not self._backlog.Lock():
+            self.SetErr("Failed to lock backlog")
+
+    def Finalize(self):
+        # Release lock
+        if self._backlog:
+            self._backlog.Unlock()
+
+        Action.Finalize(self)
+
 #---------------------------------------------------------------------------------------------------
 class ActionBacklogWrite(ActionBacklog):
     def __init__(self, backlog_dir, sensor_name, data):
         self._data = data
         super(ActionBacklogWrite, self).__init__("backlog-write",
-          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name, "data":data}))
+          OrderedDict({"backlog-path":backlog_dir, "sensor-name":sensor_name, "data":data}))
 
     def Run(self):
         err = None
         while True:
             # Write to backlog
-            if not self._backlog.Write(self._data):
+            rc, entries_num = self._backlog.Write(self._data)
+            if not rc:
                 err = "write error"; break
 
-            # Set status
-            if not self.SetOut(self._backlog.GetStatus()):
+            # Get status
+            status = self._backlog.GetStatus()
+            if not status:
                 err = "no status"; break
+
+            # Set status
+            status["new-entries"] = entries_num
+            status.move_to_end("new-entries")
+            self.SetOut(status)
 
             break # while
         if err:
@@ -1028,7 +1073,7 @@ class ActionBacklogWrite(ActionBacklog):
 class ActionBacklogClear(ActionBacklog):
     def __init__(self, backlog_dir, sensor_name):
         super(ActionBacklogClear, self).__init__("backlog-clear",
-          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name}))
+          OrderedDict({"backlog-path":backlog_dir, "sensor-name":sensor_name}))
 
     def Run(self):
         err = None
@@ -1049,7 +1094,7 @@ class ActionBacklogClear(ActionBacklog):
 class ActionBacklogRead(ActionBacklog):
     def __init__(self, backlog_dir, sensor_name):
         super(ActionBacklogRead, self).__init__("backlog-read",
-          OrderedDict({"backlog-dir":backlog_dir, "sensor-name":sensor_name}))
+          OrderedDict({"backlog-path":backlog_dir, "sensor-name":sensor_name}))
 
     def Run(self):
         err = None
@@ -1118,10 +1163,21 @@ class ActionReadSensorDs18b20(Action):
 #---------------------------------------------------------------------------------------------------
 class ActionHttpServer(Action):
     ALLOWED_ACTIONS = ["backlog-write", "read-sensor-ds18b20"]
+    OVERRIDE_ARGS = None
 
-    def __init__(self, addr, port):
+    def __init__(self, addr, port, backlog_path, db_path):
         self._addr = addr
         self._port = port
+
+        # Prepare list of overrides
+        ActionHttpServer.OVERRIDE_ARGS = {
+            "backlog-path" : backlog_path, 
+            "db-path" : db_path
+        }
+        out.Write("Override map: ")
+        for key, value in ActionHttpServer.OVERRIDE_ARGS.items():
+            out.Write(" >> " + str(key) + " -> " + str(value))
+
         super(ActionHttpServer, self).__init__("http-server", 
           OrderedDict({"addr":addr, "port":port}))
 
@@ -1136,8 +1192,9 @@ class ActionHttpServer(Action):
 
             def post(self):
                 return self.BuildResponse(
-                  RunAction(self.PrepateRequest("post"), 
-                            ActionHttpServer.ALLOWED_ACTIONS))
+                  RunAction(self.PrepateRequest("post"),
+                            ActionHttpServer.ALLOWED_ACTIONS,
+                            ActionHttpServer.OVERRIDE_ARGS))
 
             def put(self):
                 return self.BuildErrorResponse("put")
@@ -1160,6 +1217,12 @@ class ActionHttpServer(Action):
             def PrepateRequest(self, method):
                 port = request.environ.get('REMOTE_PORT')
                 json = self.GetJsonRequest(request)
+
+                # Override arguments
+                if json and isinstance(json, dict):
+                    for key, value in ActionHttpServer.OVERRIDE_ARGS.items():
+                        json[key] = value
+
                 log.Dbg("." * 80)
                 log.Dbg("Incoming request :: "                                + \
                         "time=" + str(Utils.GetTimestamp())                   + \
@@ -1233,120 +1296,135 @@ class ActionHttpClient(Action):
             self.SetErr("Failed to run http client :: " + err)
 
 #---------------------------------------------------------------------------------------------------
-def RunAction(args, allowed=None):
+def RunAction(args, allowed=None, override_args=None):
     action = None
     err = None
-    while True:
-        # Sanity check arguments
-        if not args or not isinstance(args, dict):
-            args = {}
-            err = "bad arguments"; break
+    ex_backtrace = None
+    try:
+        while True:
+            # Sanity check arguments
+            if not args or not isinstance(args, dict):
+                args = {}
+                err = "bad arguments"; break
 
-        # Get name of the action
-        name = args.get("action")
-        if not name:
-            err = "no action"; break
+            # Get name of the action
+            name = args.get("action")
+            if not name:
+                err = "no action"; break
 
-        # Filter actions
-        if allowed and name not in allowed:
-            err = "not allowed"; break
+            # Filter actions
+            if allowed and name not in allowed:
+                err = "not allowed"; break
 
-        #-------------------------------------------------------------------------------------------
-        # DB
-        #-------------------------------------------------------------------------------------------
-        # db-init
-        if name == "db-create":
-            action = ActionDbCreate(
-                args.get("path"),
-                args.get("auth-token"))
+            # Run action
+            action = RunActionOne(name, args)
+            if not action:
+                err = "unknown action"; break
 
-        # db-sensor-init
-        elif name == "db-sensor-create":
-            action = ActionDbSensorCreate(
-                args.get("path"),
-                args.get("auth-token"),
-                args.get("sensor-name"),
-                args.get("sensor-type"))
+            break
+    except:
+        import traceback
+        ex_type, ex_value, _ = sys.exc_info()
+        err = "unhandled exception :: type=" + str(ex_type) + \
+                                   ", value=" + str(ex_value)
+        ex_backtrace = traceback.format_exc()
+    if err:
+        log.Err("Failed to run action")
+        Utils.LogLines("ERR ", ">>> ", str(ex_backtrace), 0)
+        action = ActionError(err, args);
 
-        # db-sensor-write
-        elif name == "db-sensor-write":
-            action = ActionDbSensorWrite(
-                args.get("path"),
-                args.get("auth-token"),
-                args.get("sensor-name"),
-                args.get("data"))
+    # Log to terminal
+    out.Write(Utils.JsonToStr(action._status), flush=True)
 
-        # db-sensor-read
-        elif name == "db-sensor-read":
+#---------------------------------------------------------------------------------------------------
+def RunActionOne(name, args):
+    action = None
+
+    #-----------------------------------------------------------------------------------------------
+    # DB
+    #-----------------------------------------------------------------------------------------------
+    # db-init
+    if name == "db-create":
+        action = ActionDbCreate(
+            args.get("db-path"),
+            args.get("auth-token"))
+
+    # db-sensor-init
+    elif name == "db-sensor-create":
+        action = ActionDbSensorCreate(
+            args.get("db-path"),
+            args.get("auth-token"),
+            args.get("sensor-name"),
+            args.get("sensor-type"))
+
+    # db-sensor-write
+    elif name == "db-sensor-write":
+        action = ActionDbSensorWrite(
+            args.get("db-path"),
+            args.get("auth-token"),
+            args.get("sensor-name"),
+            args.get("data"))
+
+    # db-sensor-read
+    elif name == "db-sensor-read":
 #            action = ActionDbSensorRead(
 #                args.get("auth-token"), 
 #                args.get("sensor-name"), 
 #                args.get("range-from"), 
 #                args.get("range-to"), 
 #                args.get("range-size"))
-            pass
+        pass
 
-        #-------------------------------------------------------------------------------------------
-        # HTTP
-        #-------------------------------------------------------------------------------------------
-        # http-server
-        elif name == "http-server":
-            action = ActionHttpServer(
-                args.get("addr"),
-                args.get("port"))
-            pass
+    #-----------------------------------------------------------------------------------------------
+    # HTTP
+    #-----------------------------------------------------------------------------------------------
+    # http-server
+    elif name == "http-server":
+        action = ActionHttpServer(
+            args.get("addr"),
+            args.get("port"),
+            args.get("backlog-path"),
+            args.get("db-path"))
 
-        # http-client
-        elif name == "http-client":
-            action = ActionHttpClient(
-                args.get("proto"),
-                args.get("addr"),
-                args.get("port"), 
-                args.get("auth-token"),
-                args.get("data"))
-            pass
+    # http-client
+    elif name == "http-client":
+        action = ActionHttpClient(
+            args.get("proto"),
+            args.get("addr"),
+            args.get("port"), 
+            args.get("auth-token"),
+            args.get("data"))
 
-        #-------------------------------------------------------------------------------------------
-        # BACKLOG
-        #-------------------------------------------------------------------------------------------
-        # backlog-read
-        elif name == "backlog-read":
-            action = ActionBacklogRead(
-                args.get("backlog-dir"),
-                args.get("sensor-name"));
+    #-----------------------------------------------------------------------------------------------
+    # BACKLOG
+    #-----------------------------------------------------------------------------------------------
+    # backlog-read
+    elif name == "backlog-read":
+        action = ActionBacklogRead(
+            args.get("backlog-path"),
+            args.get("sensor-name"));
 
-        # backlog-write
-        elif name == "backlog-write":
-            action = ActionBacklogWrite(
-                args.get("backlog-dir"),
-                args.get("sensor-name"),
-                args.get("data"));
+    # backlog-write
+    elif name == "backlog-write":
+        action = ActionBacklogWrite(
+            args.get("backlog-path"),
+            args.get("sensor-name"),
+            args.get("data"));
 
-        # backlog-clean
-        elif name == "backlog-clear":
-            action = ActionBacklogClear(
-                args.get("backlog-dir"),
-                args.get("sensor-name"));
+    # backlog-clean
+    elif name == "backlog-clear":
+        action = ActionBacklogClear(
+            args.get("backlog-path"),
+            args.get("sensor-name"));
 
-        #-------------------------------------------------------------------------------------------
-        # SENSORS
-        #-------------------------------------------------------------------------------------------
-        # read-sensor-ds18b20
-        elif name == "read-sensor-ds18b20":
-            action = ActionReadSensorDs18b20(
-                args.get("sensor-id"),
-                args.get("random"))
-
-        # error
-        if not action:
-            err = "unknown action"; break
-
-        break # while
-    if err:
-        action = ActionError("Failed to run action :: " + err, args);
-
-    # Log to terminal
-    out.Write(Utils.JsonToStr(action._status), flush=True)
+    #-----------------------------------------------------------------------------------------------
+    # SENSORS
+    #-----------------------------------------------------------------------------------------------
+    # read-sensor-ds18b20
+    elif name == "read-sensor-ds18b20":
+        action = ActionReadSensorDs18b20(
+            args.get("sensor-id"),
+            args.get("random"))
     return action
 
 #---------------------------------------------------------------------------------------------------
@@ -1366,8 +1444,8 @@ if __name__ == "__main__":
         help='Type of the sensor')
     parser.add_argument('--data', action='store', 
         help='Data in JSON format')
-    parser.add_argument('--path', action='store', 
-        help='Path in filesystem')
+    parser.add_argument('--db-path', action='store', 
+        help='Path to DB')
     parser.add_argument('--proto', action='store', default="http", 
         help='Transport protocol (HTTP or HTTPS)')
     parser.add_argument('--auth-token', action='store', 
@@ -1380,17 +1458,13 @@ if __name__ == "__main__":
         help='Force sensor to report random data instead of reading real values')
     parser.add_argument('--clean-log', action='store_true', 
         help='Clean log file')
-    parser.add_argument('--backlog-dir', action='store', default="backlog-client",
+    parser.add_argument('--backlog-path', action='store', default="backlog-client",
         help='Location of backlog')
 
     # Build dict of arguments
     args = {}
     for key, value in vars(parser.parse_args()).items():
         args[key.replace("_", "-")] = value
-
-    # Override backlog dir when running server
-    if args["action"] == "http-server":
-        args["backlog-dir"] = "backlog-server"
 
     # Init logger writer
     log = Logger("stdout" if args["action"] == "http-server" \
