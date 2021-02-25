@@ -78,6 +78,5 @@ prepare_action "Starting piot2 wrapper ::\
     >> PATH_DATA_DB=$PATH_DATA_DB
     >> PATH_SCRIPTS=$PATH_SCRIPTS
     >> PATH_PIOT=$PATH_PIOT
-
     >> "
 cat $PATH_CONFIG | awk '{print "    >> " $0}'

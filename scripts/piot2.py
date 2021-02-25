@@ -13,7 +13,6 @@ import socket
 import random
 import re
 from collections import OrderedDict
-from _socket import close
 
 #---------------------------------------------------------------------------------------------------
 APP_NAME = "piot2"
@@ -195,6 +194,58 @@ class LogTab:
         log.Err(line, self._log_tab)
 
 #---------------------------------------------------------------------------------------------------
+class DataValidator:
+    def ValidateCommon(d, length):
+        return (d and isinstance(d, dict) and len(d) == length)
+
+    def ValidateKeyType(d, key, types):
+        if not isinstance(types, list):
+            types = [types]
+
+        if key not in d:
+            return False
+
+        value = d[key]
+        for t in types:
+            if isinstance(value, t):
+                return True
+        return False
+
+    def ValidateUser(d):
+        return d if DataValidator.ValidateCommon(d, 4) and              \
+            DataValidator.ValidateKeyType(d, "id", int) and             \
+            DataValidator.ValidateKeyType(d, "name", str) and           \
+            DataValidator.ValidateKeyType(d, "token", str) and          \
+            DataValidator.ValidateKeyType(d, "active", int)             \
+        else None
+
+    def ValidateSensor(d):
+        return d if DataValidator.ValidateCommon(d, 4) and              \
+            DataValidator.ValidateKeyType(d, "id", int) and             \
+            DataValidator.ValidateKeyType(d, "name", str) and           \
+            DataValidator.ValidateKeyType(d, "type", str) and           \
+            DataValidator.ValidateKeyType(d, "owner", int)              \
+        else None
+
+    def ValidateSensorTemperature(d):
+        return d if DataValidator.ValidateCommon(d, 2) and              \
+            DataValidator.ValidateKeyType(d, "time", int) and           \
+            DataValidator.ValidateKeyType(d, "value", (int, float))     \
+        else None
+
+    def ValidateBacklogMeta(d):
+        return d if DataValidator.ValidateCommon(d, 3) and              \
+            DataValidator.ValidateKeyType(d, "time-first", int) and     \
+            DataValidator.ValidateKeyType(d, "time-last", int) and      \
+            DataValidator.ValidateKeyType(d, "size", int)               \
+        else None
+
+    def ValidateBacklogEntry(d):
+        return d if d and isinstance(d, dict) and len(d) > 1 and        \
+            DataValidator.ValidateKeyType(d, "time", int)               \
+        else None
+
+#---------------------------------------------------------------------------------------------------
 class Backlog(LogTab):
     DATA_EXTENSION = ".piot2"
     META_EXTENSION = ".piot2.meta"
@@ -225,6 +276,10 @@ class Backlog(LogTab):
             # TODO: Rebuild meta
             pass
 
+        # Create backlog dir
+        if not Utils.IsDirPresent(self._dir):
+            Utils.CreateDir(self._dir)
+
         # Test metadata
         self._meta = None
         if Utils.IsFilePresent(self._meta_path):
@@ -251,16 +306,11 @@ class Backlog(LogTab):
             # Parse all data entries
             data_str = None
             for entry in data:
-                if not isinstance(entry, dict):
-                    err = "data entry is not a dict"; break
+                if not DataValidator.ValidateBacklogEntry(entry):
+                    err = "entry not valid"; break
 
-                if not entry["time"]:
-                    err = "data entry has no time"; break
+                # MAke sure that time always increases
                 time = entry["time"]
-
-                if not isinstance(time, int):
-                    err = "time is not an integer"; break
-
                 if time <= time_last:
                     err = "time does not increase :: time=" + str(time) + \
                                                    " time_last=" + str(time_last); break
@@ -277,11 +327,6 @@ class Backlog(LogTab):
                     data_str += ", "
                 data_str += Utils.JsonToStr(entry) + "\n"
             if err: break
-
-            # Create backlog dir
-            if not Utils.IsDirPresent(self._dir) and \
-               not Utils.CreateDir(self._dir):
-                err = "no dir"; break
 
             # Write data
             if not Utils.WriteFile(path, data_str, False):
@@ -398,28 +443,17 @@ class Backlog(LogTab):
             if not body:
                 err = "no body"; break
 
-            # Parse meta file
-            data = Utils.StrToJson(body)
+            # Validate meta
+            data = DataValidator.ValidateBacklogMeta(Utils.StrToJson(body))
             if not data:
-                err = "not a json"; break
+                err = "meta not valid"; break
 
-            # Read meta entries
-            time_first = time_last = size = 0
-            try:
-                time_first = data["time-first"]
-                time_last = data["time-last"]
-                size = data["size"]
-            except:
-                err = "no entries"; break
-
-            if not isinstance(time_first, int) or \
-               not isinstance(time_last, int) or \
-               not isinstance(size, int):
-                err = "not an integer entries"; break
-
-            # Validate meta entries
+            # Make sure values are sane
+            time_first = data["time-first"]
+            time_last = data["time-last"]
+            size = data["size"]
             if time_last < time_first or size < 0:
-                err = "bad entries"; break
+                err = "bad values"; break
 
             break # while
         if err:
@@ -763,29 +797,6 @@ class ActionError(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionDb(Action):
-    def ValidateUser(d):
-        return d if d and isinstance(d, dict) and len(d) == 4 and           \
-                       "id" in d or isinstance(d["id"], int) and            \
-                       "name" in d or isinstance(d["name"], str) and        \
-                       "token" in d or isinstance(d["token"], str) and      \
-                       "active" in d or isinstance(d["active"], int)        \
-                    else None
-
-    def ValidateSensor(d):
-        return d if d and isinstance(d, dict) and len(d) == 4 and           \
-                   "id" in d or isinstance(d["id"], int) and                \
-                   "name" in d or isinstance(d["name"], str) and            \
-                   "type" in d or isinstance(d["type"], str) and            \
-                   "owner" in d or isinstance(d["owner"], int)              \
-                else None
-
-    def ValidateSensorTemperature(d):
-        return d if d and isinstance(d, dict) and len(d) == 2 and           \
-                    "time" in d and isinstance(d["time"], int) and          \
-                    "value" in d and (isinstance(d["value"], int) or        \
-                                      isinstance(d["value"], float))        \
-                else None
-
     def __init__(self, cmd, args):
         self._path = args["db-path"]
         self._auth_token = args["auth-token"]
@@ -848,14 +859,14 @@ class ActionDb(Action):
     def GetUserByToken(self, token):
         err = user = None
         while True:
-            row = self._db. ReadRow("users", ("token", token))
+            row = self._db.ReadRow("users", ("token", token))
             if not row:
                 err = "user not found"; break
 
             if len(row) != 4:
                 err = "bad user record"; break
 
-            user = ActionDb.ValidateUser(\
+            user = DataValidator.ValidateUser(\
               {"id":row[0], "name":row[1], "token":row[2], "active":row[3]})
             if not user:
                 err = "validation failed"
@@ -875,7 +886,7 @@ class ActionDb(Action):
             if len(row) != 4:
                 err = "bad sensor record"; break
 
-            sensor = ActionDb.ValidateSensor(\
+            sensor = DataValidator.ValidateSensor(\
               {"id":row[0], "name":row[1], "type":row[2], "owner":row[3]})
             if not sensor:
                 err = "validation failed"
@@ -989,7 +1000,7 @@ class ActionDbSensorWrite(ActionDb):
                 # Write temperature sensor
                 values = None
                 if sensor["type"] == "temperature":
-                    if not ActionDb.ValidateSensorTemperature(entry):
+                    if not DataValidator.ValidateSensorTemperature(entry):
                         err = "bad temperature data"; break
                     values = (entry["time"], entry["value"])
 
@@ -1157,7 +1168,6 @@ class ActionReadSensorDs18b20(Action):
         if value != None:
             data["time"] = Utils.GetUnixTimestamp()
             data["value"] = value
-            data["uptime"] = Utils.GetUptime()
         self.SetOut(data)
 
 #---------------------------------------------------------------------------------------------------
@@ -1335,6 +1345,7 @@ def RunAction(args, allowed=None, override_args=None):
 
     # Log to terminal
     out.Write(Utils.JsonToStr(action._status), flush=True)
+    return action
 
 #---------------------------------------------------------------------------------------------------
 def RunActionOne(name, args):

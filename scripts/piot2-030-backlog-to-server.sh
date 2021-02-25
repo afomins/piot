@@ -6,7 +6,7 @@ if [ "$#" -ne 1 ]; then
     exit 42
 fi
 
-# Include common scripts
+# Include common script
 PATH_SCRIPTS=`dirname "$(readlink -f "$0")"`
 PATH_PIOT="$PATH_SCRIPTS/piot2.py"
 source $PATH_SCRIPTS/piot2-common.sh "$1" "client"
