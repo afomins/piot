@@ -1,0 +1,9 @@
+Package: piot2
+Version: 0.1
+Section: custom
+Priority: optional
+Architecture: all
+Essential: no
+Installed-Size: 1024
+Maintainer: afomins@gmail.com
+Description: Manage PIOT db
