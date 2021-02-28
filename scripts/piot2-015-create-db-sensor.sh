@@ -13,7 +13,7 @@ source $PATH_SCRIPTS/piot2-common.sh "$1" "server"
 
 # Main
 function main {
-    # Create DB if it is missing
+    # Create DB if it's missing
     if [ ! -f "$PATH_DATA_DB" ]; then
         prepare_action "Creating DB :: path=$PATH_DATA_DB"
         out=`$PATH_PIOT --action=db-create \
@@ -22,7 +22,7 @@ function main {
         process_action "$out" $?
     fi
 
-    # Create sensor if it is missing
+    # Create sensor
     prepare_action "Creating sensor in DB :: path=$PATH_DATA_DB"
     out=`$PATH_PIOT --action=db-sensor-create \
                     --db-path=$PATH_DATA_DB \

@@ -38,7 +38,7 @@ function main {
     db_size=$(json_read_key "$__piot_data" "size" 0)
     new_entries=$(json_read_key "$__piot_data" "new-entries" 0)
     log_param "db-size" "$db_size"
-    log_param "new-entries" "$backlog_size"
+    log_param "new-entries" "$new_entries"
 
     # Clear backlog after successfully writing it to db
     prepare_action "Clearing local backlog :: name=$SENSOR_NAME"

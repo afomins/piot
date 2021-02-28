@@ -17,7 +17,6 @@ function main {
     prepare_action "Starting server :: addr=$SERVER_PROTO://$SERVER_ADDR:$SERVER_PORT
 
     "
-
     eval "$PATH_PIOT --action=http-server \
                      --addr=$SERVER_ADDR \
                      --port=$SERVER_PORT \

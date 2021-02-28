@@ -11,7 +11,6 @@ import datetime
 import sys
 import socket
 import random
-import re
 from collections import OrderedDict
 
 #---------------------------------------------------------------------------------------------------
@@ -1175,7 +1174,7 @@ class ActionHttpServer(Action):
     ALLOWED_ACTIONS = ["backlog-write", "read-sensor-ds18b20"]
     OVERRIDE_ARGS = None
 
-    def __init__(self, addr, port, backlog_path, db_path):
+    def __init__(self, cmd, addr, port, backlog_path, db_path):
         self._addr = addr
         self._port = port
 
@@ -1188,31 +1187,60 @@ class ActionHttpServer(Action):
         for key, value in ActionHttpServer.OVERRIDE_ARGS.items():
             out.Write(" >> " + str(key) + " -> " + str(value))
 
-        super(ActionHttpServer, self).__init__("http-server", 
+        super(ActionHttpServer, self).__init__(cmd, 
           OrderedDict({"addr":addr, "port":port}))
 
+    def SendResponse(self, action, status_code):
+        # Override
+        return None
+
+    def SendErrorResponse(self, method):
+        return self.SendResponse(
+            ActionError(method + " not supported", self.PrepateRequest(method)), 200)
+
+    def ProcessRequest(self, ip, port, json):
+        # Log
+        log.Dbg("." * 80)
+        log.Dbg("Incoming request :: "                              + \
+                "time=" + str(Utils.GetTimestamp())                 + \
+                ", ip=" + str(ip)                                   + \
+                ", port=" + str(port)                               + \
+                ", json=" + ("yes" if json else "no"))
+
+        # Prepare json
+        if json and isinstance(json, dict):
+            for key, value in ActionHttpServer.OVERRIDE_ARGS.items():
+                json[key] = value
+        else:
+            json = {}
+
+        # Run action & send response
+        return self.SendResponse(
+            RunAction(json, ActionHttpServer.ALLOWED_ACTIONS), 200)
+
+#---------------------------------------------------------------------------------------------------
+class ActionHttpServerFlask(ActionHttpServer):
+    def __init__(self, addr, port, backlog_path, db_path):
+        super(ActionHttpServerFlask, self).__init__("http-server-flask", 
+          addr, port, backlog_path, db_path)
+
+    def SendResponse(self, action, status_code):
+        from flask import make_response, jsonify
+
+        return make_response(jsonify(action._status), status_code)
+
     def Run(self):
-        from flask import Flask, jsonify, make_response
+        from flask import Flask
         from flask_restful import Api, Resource, request
 
-        #-------------------------------------------------------------------------------------------
+        p = self
         class RestApi(Resource):
             def get(self):
-                return self.BuildErrorResponse("get")
+                return p.SendErrorResponse("get")
 
             def post(self):
-                return self.BuildResponse(
-                  RunAction(self.PrepateRequest("post"),
-                            ActionHttpServer.ALLOWED_ACTIONS,
-                            ActionHttpServer.OVERRIDE_ARGS))
-
-            def put(self):
-                return self.BuildErrorResponse("put")
-
-            def delete(self):
-                return self.BuildErrorResponse("delete")
-
-            def GetJsonRequest(self, request):
+                # Get json
+                json = None
                 if request.is_json:
                     json = request.get_json(silent=True)
                 else:
@@ -1222,37 +1250,69 @@ class ActionHttpServer(Action):
                     else:
                         json_str = None
                     json = Utils.StrToJson(json_str) if json_str else None
-                return json
 
-            def PrepateRequest(self, method):
+                # Process request
+                ip = request.environ.get('REMOTE_ADDR')
                 port = request.environ.get('REMOTE_PORT')
-                json = self.GetJsonRequest(request)
+                return p.ProcessRequest(ip, port, json) 
 
-                # Override arguments
-                if json and isinstance(json, dict):
-                    for key, value in ActionHttpServer.OVERRIDE_ARGS.items():
-                        json[key] = value
+            def put(self):
+                return p.SendErrorResponse("put")
 
-                log.Dbg("." * 80)
-                log.Dbg("Incoming request :: "                                + \
-                        "time=" + str(Utils.GetTimestamp())                   + \
-                        ", method=" + method                                  + \
-                        ", port=" + str(port)                                 + \
-                        ", json=" + ("yes" if json else "no"))
-                return json if json else {}
-
-            def BuildResponse(self, action):
-                return make_response(jsonify(action._status), 200)
-
-            def BuildErrorResponse(self, method):
-                return self.BuildResponse(
-                  ActionError(method + " not supported", 
-                              self.PrepateRequest(method)))
+            def delete(self):
+                return p.SendErrorResponse("delete")
 
         app = Flask(APP_NAME)
         api = Api(app)
         api.add_resource(RestApi, "/api")
         app.run(debug=False, host=self._addr, port=self._port)
+
+#---------------------------------------------------------------------------------------------------
+class ActionHttpServerSimple(ActionHttpServer):
+    _httpd = None
+
+    def __init__(self, addr, port, backlog_path, db_path):
+        super(ActionHttpServerSimple, self).__init__("http-server-simple", 
+          addr, port, backlog_path, db_path)
+
+    def SendResponse(self, action, status_code):
+        ActionHttpServerSimple._httpd._write_response(
+            Utils.JsonToStr(action._status).encode('utf-8'), status_code)
+
+    def Run(self):
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from http import HTTPStatus
+        import json
+
+        p = self
+        class HttpRequestHandler(BaseHTTPRequestHandler):
+            def _write_response(self, response, code):
+                self.send_response(HTTPStatus(code).value)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(response)
+
+            def do_POST(self):
+                # Init httpd so that it can be reachable from SendResponse()
+                ActionHttpServerSimple._httpd = self
+
+                # Process request
+                ip, port = self.client_address
+                length = int(self.headers.get('content-length'))
+                message = json.loads(self.rfile.read(length))
+                p.ProcessRequest(ip, port, message) 
+
+            def do_OPTIONS(self):
+                self.send_response(HTTPStatus.NO_CONTENT.value)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'POST')
+                self.send_header('Access-Control-Allow-Headers', 'content-type')
+                self.end_headers()
+
+        server_address = (self._addr, self._port)
+        httpd = HTTPServer(server_address, HttpRequestHandler)
+        httpd.serve_forever()
 
 #---------------------------------------------------------------------------------------------------
 class ActionHttpClient(Action):
@@ -1390,12 +1450,16 @@ def RunActionOne(name, args):
     # HTTP
     #-----------------------------------------------------------------------------------------------
     # http-server
-    elif name == "http-server":
-        action = ActionHttpServer(
-            args.get("addr"),
-            args.get("port"),
-            args.get("backlog-path"),
-            args.get("db-path"))
+    elif name.startswith("http-server"):
+        a = (args.get("addr"),
+             args.get("port"),
+             args.get("backlog-path"),
+             args.get("db-path"))
+        action = \
+            ActionHttpServerSimple(*a)  if name == "http-server"        else \
+            ActionHttpServerSimple(*a)  if name == "http-server-simple" else \
+            ActionHttpServerFlask(*a)   if name == "http-server-flask"  else \
+            None
 
     # http-client
     elif name == "http-client":
@@ -1457,6 +1521,8 @@ if __name__ == "__main__":
         help='Data in JSON format')
     parser.add_argument('--db-path', action='store', 
         help='Path to DB')
+    parser.add_argument('--backlog-path', action='store', default="backlog-client",
+        help='Location of backlog')
     parser.add_argument('--proto', action='store', default="http", 
         help='Transport protocol (HTTP or HTTPS)')
     parser.add_argument('--auth-token', action='store', 
@@ -1469,8 +1535,6 @@ if __name__ == "__main__":
         help='Force sensor to report random data instead of reading real values')
     parser.add_argument('--clean-log', action='store_true', 
         help='Clean log file')
-    parser.add_argument('--backlog-path', action='store', default="backlog-client",
-        help='Location of backlog')
 
     # Build dict of arguments
     args = {}
@@ -1478,7 +1542,8 @@ if __name__ == "__main__":
         args[key.replace("_", "-")] = value
 
     # Init logger writer
-    log = Logger("stdout" if args["action"] == "http-server" \
+    action_name = args["action"]
+    log = Logger("stdout" if action_name.startswith("http-server") \
                           else LOG_FILE, args["clean-log"])
     log.Dbg(">" * 80)
     log.Dbg("Starting " + APP_NAME + " @ " + str(Utils.GetTimestamp()))
