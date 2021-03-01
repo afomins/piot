@@ -1,14 +1,17 @@
 #!/bin/bash
 
-# Cleanup build directory
-OUTPUT=".output"
-rm -rf $OUTPUT
-mkdir -p $OUTPUT/opt/piot2
+# Prepare working directory
+WORKING=".working"
+rm -rf $WORKING
+mkdir -p $WORKING/opt/piot2
+cp ./scripts/piot2* $WORKING/opt/piot2
+cp -r ./DEBIAN $WORKING
 
-# Prepare build directory
-cp scripts/piot2* $OUTPUT/opt/piot2
-cp -r DEBIAN $OUTPUT
+# Prepare output directory
+OUTPUT=".output"
+mkdir $OUTPUT
 
 # Run
-dpkg-deb --build $OUTPUT
-mc $OUTPUT.deb piot2.deb
+dpkg-deb --build $WORKING
+version=$(cat DEBIAN/control | grep Version | cut -d: -f2 | xargs)
+mv $WORKING.deb ./$OUTPUT/piot2-v$version.deb

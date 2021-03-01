@@ -95,7 +95,7 @@ class Utils:
 
     def JsonToStr(json_obj, indent=None):
         try:
-            return str(json.dumps(json_obj, indent = indent))
+            return str(json.dumps(json_obj, indent=indent))
         except:
             return "{}"
 
@@ -1171,7 +1171,7 @@ class ActionReadSensorDs18b20(Action):
 
 #---------------------------------------------------------------------------------------------------
 class ActionHttpServer(Action):
-    ALLOWED_ACTIONS = ["backlog-write", "read-sensor-ds18b20"]
+    ALLOWED_ACTIONS = ["backlog-write"]
     OVERRIDE_ARGS = None
 
     def __init__(self, cmd, addr, port, backlog_path, db_path):
