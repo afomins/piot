@@ -11,6 +11,7 @@ PATH_SCRIPTS=`dirname "$(readlink -f "$0")"`
 PATH_PIOT="$PATH_SCRIPTS/piot2.py"
 source $PATH_SCRIPTS/piot2-common.sh "$1" "client"
 
+# Main
 function main {
     # Read sensor backlog
     prepare_action "Reading backlog :: name=$SENSOR_NAME"
