@@ -1,0 +1,9 @@
+[Unit]
+Description=Piot2 Server Service
+
+[Service]
+ExecStart=/opt/piot2/piot2-ctrl.sh server-hook
+User=__pio2
+
+[Install]
+WantedBy=multi-user.target

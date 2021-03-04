@@ -1391,7 +1391,7 @@ def RunAction(args, allowed=None, override_args=None):
             if not action:
                 err = "unknown action"; break
 
-            break
+            break # while
     except:
         import traceback
         ex_type, ex_value, _ = sys.exc_info()
@@ -1414,13 +1414,13 @@ def RunActionOne(name, args):
     #-----------------------------------------------------------------------------------------------
     # DB
     #-----------------------------------------------------------------------------------------------
-    # db-init
+    # db-create
     if name == "db-create":
         action = ActionDbCreate(
             args.get("db-path"),
             args.get("auth-token"))
 
-    # db-sensor-init
+    # db-sensor-create
     elif name == "db-sensor-create":
         action = ActionDbSensorCreate(
             args.get("db-path"),
@@ -1456,9 +1456,9 @@ def RunActionOne(name, args):
              args.get("backlog-path"),
              args.get("db-path"))
         action = \
-            ActionHttpServerSimple(*a)  if name == "http-server"        else \
-            ActionHttpServerSimple(*a)  if name == "http-server-simple" else \
-            ActionHttpServerFlask(*a)   if name == "http-server-flask"  else \
+            ActionHttpServerSimple(*a) if name == "http-server"        else \
+            ActionHttpServerSimple(*a) if name == "http-server-simple" else \
+            ActionHttpServerFlask(*a)  if name == "http-server-flask"  else \
             None
 
     # http-client
@@ -1486,7 +1486,7 @@ def RunActionOne(name, args):
             args.get("sensor-name"),
             args.get("data"));
 
-    # backlog-clean
+    # backlog-clear
     elif name == "backlog-clear":
         action = ActionBacklogClear(
             args.get("backlog-path"),

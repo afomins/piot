@@ -1,9 +1,7 @@
 Package: piot2
 Version: 0.1
-Section: custom
-Priority: optional
+Maintainer: Alex Fomins <afomins@gmail.com>
+Description: Collect sensor data and store it in PIOT DB
+Homepage: https://github.com/afomins/piot
 Architecture: all
-Essential: no
-Installed-Size: 1024
-Maintainer: afomins@gmail.com
-Description: Manage PIOT db
+Depends: python3 (>=3.8), jq (>=1.6), sqlite3 (>=3.31.1)
