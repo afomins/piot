@@ -1,9 +1,11 @@
 [Unit]
-Description=Piot2 Client Service
+Description=Piot2 client service
+#Wants=piot2-client.timer
 
 [Service]
+Type=oneshot
+User=__piot2
 ExecStart=/opt/piot2/piot2-ctrl.sh client-hook
-User=__pio2
 
 [Install]
 WantedBy=multi-user.target

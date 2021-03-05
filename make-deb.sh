@@ -17,6 +17,9 @@ cp -r ./DEBIAN $WORKING
 OUTPUT=".output"
 mkdir -p $OUTPUT
 
+# Put "piot2-ctrl" to /usr/bin
+dh_link opt/piot2/piot2-ctrl.sh usr/bin/piot2-ctrl
+
 # Made deb package
 dpkg-deb --build $WORKING
 version=$(cat DEBIAN/control | grep Version | cut -d: -f2 | xargs)

@@ -1,9 +1,11 @@
 [Unit]
-Description=Piot2 Server Service
+Description=Piot2 server service
+#Wants=piot2-server.timer
 
 [Service]
+Type=oneshot
+User=__piot2
 ExecStart=/opt/piot2/piot2-ctrl.sh server-hook
-User=__pio2
 
 [Install]
 WantedBy=multi-user.target
