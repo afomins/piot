@@ -1,0 +1,11 @@
+[Unit]
+Description=Piot2 server timer
+Requires=piot2-server.service
+
+[Timer]
+Unit=piot2-server.service
+OnCalendar=*-*-* *:*:00
+AccuracySec=5sec
+
+[Install]
+WantedBy=timers.target
