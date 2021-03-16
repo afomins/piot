@@ -1,0 +1,13 @@
+9e4766b2104cf7d476ae21745a89d0f8  opt/piot2/cfg/test-000.cfg
+52a1e83a4f346092f0c2106c8597f31c  opt/piot2/hooks/piot2-client-hook.sh
+e9cb3ba1bd0791815102ae5be9896a93  opt/piot2/hooks/piot2-server-hook.sh
+e4d7c852b6e3950678bf85409e900f96  opt/piot2/piot2-common.sh
+42dcd0d1ee0bc8d291ed26c5bac89a04  opt/piot2/piot2-create-sensor-in-db.sh
+52cce59621ed9755de70f5f7f0e1bd11  opt/piot2/piot2-ctrl.sh
+e6f50cc282f6b2afd475c97fce77cb02  opt/piot2/piot2-send-backlog-to-server.sh
+ecb19b47e2485623ad74a4d4879a864d  opt/piot2/piot2-start-server.sh
+f0aebda69f1debe92b66d051e041a9e6  opt/piot2/piot2-write-backlog-to-db.sh
+8041d29e29ef70e87d1d60ddcc5fa4eb  opt/piot2/piot2-write-sensor-to-backlog.sh
+9629f8c8f51defd1c8ed46343db19a2a  opt/piot2/piot2-write-sensor-to-db.sh
+80d84a11b68fa0e4697a40db03cce346  opt/piot2/piot2.py
+b044a8f8acf09715daa0f86ac23dc236  usr/share/doc/piot2/changelog.Debian.gz

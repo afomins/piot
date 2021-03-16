@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+export DESTROOT=$(CURDIR)/debian/piot2
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	dh_auto_install
+	dh_installdirs opt/piot2/hooks
+	dh_installdirs opt/piot2/cfg
+
+	install -p -m 0755 scripts/* $(DESTROOT)/opt/piot2/
+	install -p -m 0755 hooks/* $(DESTROOT)/opt/piot2/hooks/
+	install -p -m 0640 cfg/* $(DESTROOT)/opt/piot2/cfg/
+	dh_link opt/piot2/piot2-ctrl.sh usr/bin/piot2-ctrl
