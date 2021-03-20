@@ -4,8 +4,8 @@ Description=Piot2 client service
 
 [Service]
 Type=oneshot
-User=__piot2
-ExecStart=/opt/piot2/piot2-ctrl.sh client-hook
+User=XXpiot2XX
+ExecStart=/opt/piot2/piot2-ctrl.sh hook-client
 
 [Install]
 WantedBy=multi-user.target

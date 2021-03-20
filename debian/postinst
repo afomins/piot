@@ -1,5 +1,11 @@
 #!/bin/sh
 set -e
 
-adduser --system __piot2
-chown -hR __piot2 /opt/piot2
+adduser --system --no-create-home XXpiot2XX
+chown -hR XXpiot2XX /opt/piot2
+chown -hR XXpiot2XX /usr/bin/piot2-ctrl
+
+systemctl enable piot2-client.service
+systemctl enable piot2-client.timer
+systemctl enable piot2-server.service
+systemctl enable piot2-server.timer

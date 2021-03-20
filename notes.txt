@@ -29,3 +29,34 @@ Read piot server:
 ~/git/piot/scripts/piot2.py --action=db-sensor-create --path=dummy3.sqlite --auth-token=qwerty --sensor-name=br1 --sensor-type=temperature| jq
 ~/git/piot/scripts/piot2.py --action=db-sensor-write --path=dummy3.sqlite --auth-token=qwerty --sensor-name=br2 --data="[{\"time\":3, \"value\":48.0}, {\"time\":30, \"value\":480.0}]"| jq
 
+https://hub.docker.com/r/jrei/systemd-ubuntu
+
+podman build -f Dockerfile -t piot4
+
+
+
+podman run --interactive --tty --name piot4 \
+--volume /etc/localtime:/etc/localtime:ro \
+--volume /home/$(whoami)/piot/sharing:/mnt \
+--volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
+--tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
+piot4:latest
+
+podman run --name piot4 \
+--volume /etc/localtime:/etc/localtime:ro \
+--volume /home/$(whoami)/piot/sharing:/mnt \
+--volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
+--tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
+piot4:latest
+
+
+podman run --name piot2 \
+--volume /etc/localtime:/etc/localtime:ro \
+--volume /home/$(whoami)/piot/sharing:/mnt ubuntu:latest
+
+podman start piot4
+podman exec --interactive --tty piot3 /bin/bash
+
+
+apt-get update
+apt-get install python3 sqlite3 jq
