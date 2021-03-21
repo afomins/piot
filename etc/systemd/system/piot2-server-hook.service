@@ -1,0 +1,10 @@
+[Unit]
+Description=Piot2 server hook service
+
+[Service]
+Type=oneshot
+User=XXpiot2XX
+ExecStart=/usr/bin/piot2-ctrl --action=hook-server
+
+[Install]
+WantedBy=multi-user.target

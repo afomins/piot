@@ -1,51 +1,54 @@
 #!/bin/bash
 
-# Argparse
-for i in "$@"; do
-case $i in
-    --action=*)
-    ARGS_ACTION="${i#*=}"
-    shift # past argument=value
-    ;;
-    --config=*)
-    ARGS_CONFIG_NAME="${i#*=}"
-    shift # past argument=value
-    ;;
-    --container)
-    ARGS_IN_CONTAINER=true
-    shift # past argument with no value
-    ;;
-    --cmd=*)
-    ARGS_CMD="${i#*=}"
-    shift # past argument=value
-    ;;
-    *)
-          # unknown option
-    ;;
-esac
-done
-
-# Define variables
+# Vars
 SCRIPTS_DIR="/opt/piot2"
 HOOKS_DIR="$SCRIPTS_DIR/hooks"
 CONFIG_DIR="$SCRIPTS_DIR/cfg"
-CONFIG_FILE_PATH="$CONFIG_DIR/$ARGS_CONFIG_NAME"
 DOCKER_IMAGE_NAME="piot2"
-DOCKER_FILE_PATH="/tmp/dockerfile.$DOCKER_IMAGE_NAME"
+ARGS_NO_CONTAINER=""
+
+# Parse arguments
+for i in "$@"; do
+    case $i in
+        --action=*)
+        ARGS_ACTION="${i#*=}"
+        ARGS_NO_CONTAINER+=" --action=$ARGS_ACTION"
+        shift
+        ;;
+        --config=*)
+        ARGS_CONFIG_NAME="${i#*=}"
+        ARGS_NO_CONTAINER+=" --config=$ARGS_CONFIG_NAME"
+        shift
+        ;;
+        --container)
+        ARGS_IN_CONTAINER=true
+        shift
+        ;;
+        --cmd=*)
+        ARGS_CMD="${i#*=}"
+        ARGS_NO_CONTAINER+=" --cmd=$ARGS_CMD"
+        shift
+        ;;
+        *)
+        ;;
+    esac
+done
 
 # ------------------------------------------------------------------------------
 usage () {
     echo """
-Usage: $0 --action=aaa
+Usage: $0 --action=xxx
 """
     exit 42
 }
 
 # ------------------------------------------------------------------------------
 create_config() {
-    # Dump to terminal by default
-    [ -z "$ARGS_CONFIG_NAME" ] && CONFIG_FILE_PATH="/dev/stdout"
-echo '''SENSOR_ID="00000000000"
+    local path=$1
+
+    # Create dummy config
+echo '''
+SENSOR_ID="00000000000"
 SENSOR_NAME="br5-bsmt-temp-heater-in"
 SENSOR_TYPE="temperature"
 SENSOR_RANDOM="--random"
@@ -54,7 +57,19 @@ SERVER_PROTO="http"
 SERVER_ADDR="localhost"
 SERVER_PORT="8000"
 SERVER_AUTH_TOKEN="qwerty"
-''' > $CONFIG_FILE_PATH
+
+# Events:
+#   OnCloseConfig:
+#     piot2-create-sensor-in-db             = yes
+#
+#   OnClientHook:
+#     piot2-write-sensor-to-db              = yes
+#     piot2-write-sensor-to-backlog         = no
+#     piot2-send-backlog-to-server          = no
+''' > $path
+
+    # Open config file for editing
+    nano $path
 }
 
 # ------------------------------------------------------------------------------
@@ -72,6 +87,37 @@ status_server() {
 }
 
 # ------------------------------------------------------------------------------
+sensors_enable() {
+echo '''# ds18b20 temperature sensor
+w1-gpio
+w1-therm
+''' > /etc/modules-load.d/piot2-sensors.conf
+    [ $? -eq 0 ] && echo "Successfully added startup modules" \
+        || echo "Failed to add startup modules"
+    modprobe w1-gpio && echo "Successfully loaded w1-gpio" \
+        || echo "Failed to load w1-gpio"
+    modprobe w1-therm && echo "Successfully loaded w1-therm" \
+        || echo "Failed to load w1-therm"
+}
+
+# ------------------------------------------------------------------------------
+sensors_disable() {
+    modprobe -r w1-therm && echo "Successfully unloaded w1-therm" \
+        || echo "Failed to unload w1-therm"
+    modprobe -r w1-gpio && echo "Successfully unloaded w1-gpio" \
+        || echo "Failed to unload w1-gpio"
+    rm /etc/modules-load.d/piot2-sensors.conf
+    [ $? -eq 0 ] && echo "Successfully removed startup modules" \
+        || echo "Failed to remove startup modules"
+}
+
+# ------------------------------------------------------------------------------
+server_start() {
+    echo "Starting piot2 server"
+    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
+}
+
+# ------------------------------------------------------------------------------
 create_docker_file() {
     local dest=$1
 echo '''FROM ubuntu:18.04
@@ -83,7 +129,7 @@ ENV DEBIAN_FRONTEND noninteractive
 RUN sed -i "s/# deb/deb/g" /etc/apt/sources.list
 
 RUN apt-get update \
-    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 \
+    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 nano \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -108,25 +154,26 @@ CMD ["/lib/systemd/systemd"]
 
 # ------------------------------------------------------------------------------
 container_start() {
-    local name=$DOCKER_IMAGE_NAME
+    local name=$1
+    local dockerfile=$2
     local rc=0
 
     # Create image if it's absent
     (podman image exists $name) &> /dev/null; rc=$?
     if [ $rc -ne 0 ]; then
-        echo "Creating docker file :: path=$DOCKER_FILE_PATH"
-        create_docker_file $DOCKER_FILE_PATH
+        echo "Creating docker file :: path=$dockerfile"
+        create_docker_file $dockerfile
 
         echo "Creating image :: name=$name"
-        podman build -f $DOCKER_FILE_PATH -t $name
+        podman build -f $dockerfile -t $name
 
-        echo "Creatin container"
+        echo "Creating container"
         podman create --name $name \
             --volume /etc/localtime:/etc/localtime:ro \
             --volume /home/$(whoami)/piot/sharing:/mnt \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
             --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
-            $DOCKER_IMAGE_NAME:latest
+            $name:latest
     fi
 
     # Start container if it's not running
@@ -142,7 +189,7 @@ container_start() {
 
 # ------------------------------------------------------------------------------
 container_stop() {
-    local name=$DOCKER_IMAGE_NAME
+    local name=$1
 
     echo "Stopping container :: name=$name"
     podman stop $name
@@ -150,7 +197,7 @@ container_stop() {
 
 # ------------------------------------------------------------------------------
 container_delete() {
-    local name=$DOCKER_IMAGE_NAME
+    local name=$1
 
     echo "Deleting image :: name=$name"
     podman stop $name
@@ -160,61 +207,93 @@ container_delete() {
 
 # ------------------------------------------------------------------------------
 container_status() {
-    local name=$DOCKER_IMAGE_NAME
+    local name=$1
     podman ps -all --filter name=$name
 }
 
 # ------------------------------------------------------------------------------
 container_shell() {
-    local name=$DOCKER_IMAGE_NAME
-#     podman exec --interactive --tty $name /bin/bash "ls"
-    podman exec --tty $name ls
+    local name=$1
+    local cmd=$2
+
+    [ -z "$cmd" ] && cmd="/bin/bash" # Run bash by default
+    eval podman exec --interactive --tty "$name" "$cmd"
 }
 
 # ------------------------------------------------------------------------------
-# Main
-case $ARGS_ACTION in
-    hook-client)
-        source $HOOKS_DIR/piot2-client-hook.sh
-    ;;
+main() {
+    local name=$DOCKER_IMAGE_NAME
+    local action=$ARGS_ACTION
+    local cmd=$ARGS_CMD
+    local config=$ARGS_CONFIG_NAME
 
-    hook-server)
-        source $HOOKS_DIR/piot2-server-hook.sh
-    ;;
+    # Rus action in container
+    if [ -n "$ARGS_IN_CONTAINER" ]; then
+        container_shell "$name" "piot2-ctrl $ARGS_NO_CONTAINER"
+        exit $?
+    fi
 
-    config-create)
-        create_config
-    ;;
+    # Run action locally
+    case $action in
+        hook-client)
+            source $HOOKS_DIR/piot2-client-hook.sh
+        ;;
 
-    status-client)
-        status_client
-    ;;
+        hook-server)
+            source $HOOKS_DIR/piot2-server-hook.sh
+        ;;
 
-    status-server)
-        status_server
-    ;;
+        config-create)
+            [ -z "$config" ] \
+                && path="/dev/stdout" \
+                || path="$CONFIG_DIR/$config"
+            create_config $path
+        ;;
 
-    container-start)
-        container_start
-    ;;
+        status-client)
+            status_client
+        ;;
 
-    container-stop)
-        container_stop
-    ;;
+        status-server)
+            status_server
+        ;;
 
-    container-delete)
-        container_delete
-    ;;
+        sensors-enable)
+            sensors_enable
+        ;;
 
-    container-status)
-        container_status
-    ;;
+        sensors-disable)
+            sensors_disable
+        ;;
 
-    container-shell)
-        container_shell
-    ;;
+        server-start)
+            server_start
+        ;;
 
-    *)
-        usage
-    ;;
-esac
+        container-start)
+            dockerfile="/tmp/dockerfile.$name"
+            container_start "$name" "$dockerfile"
+        ;;
+
+        container-stop)
+            container_stop "$name"
+        ;;
+
+        container-delete)
+            container_delete "$name"
+        ;;
+
+        container-status)
+            container_status "$name"
+        ;;
+
+        container-shell)
+            container_shell "$name" "$cmd"
+        ;;
+
+        *)
+            usage
+        ;;
+    esac
+}
+main

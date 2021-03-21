@@ -7,12 +7,10 @@ export DESTROOT=$(CURDIR)/debian/piot2
 
 override_dh_auto_install:
 	dh_auto_install
-	dh_installdirs etc/modules-load.d
 	dh_installdirs etc/systemd/system
 	dh_installdirs opt/piot2/hooks
 	dh_installdirs opt/piot2/cfg
 
-	install -p -m 0644 etc/modules-load.d/* $(DESTROOT)/etc/modules-load.d/
 	install -p -m 0644 etc/systemd/system/* $(DESTROOT)/etc/systemd/system/
 	install -p -m 0755 scripts/* $(DESTROOT)/opt/piot2/
 	install -p -m 0755 hooks/* $(DESTROOT)/opt/piot2/hooks/

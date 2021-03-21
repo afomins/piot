@@ -1,11 +1,13 @@
 [Unit]
 Description=Piot2 server service
-#Wants=piot2-server.timer
+After=network.target
 
 [Service]
-Type=oneshot
+Type=simple
+Restart=always
+RestartSec=5
 User=XXpiot2XX
-ExecStart=/opt/piot2/piot2-ctrl.sh hook-server
+ExecStart=/usr/bin/piot2-ctrl --action=server-start
 
 [Install]
 WantedBy=multi-user.target

@@ -1,9 +1,9 @@
 [Unit]
-Description=Piot2 server timer
-Requires=piot2-server.service
+Description=Piot2 server hook timer
+Requires=piot2-server-hook.service
 
 [Timer]
-Unit=piot2-server.service
+Unit=piot2-server-hook.service
 OnCalendar=*-*-* *:*:00
 AccuracySec=5sec
 

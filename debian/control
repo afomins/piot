@@ -8,5 +8,5 @@ Homepage: https://github.com/afomins/piot
 
 Package: piot2
 Architecture: all
-Depends: ${shlibs:Depends}, python3 (>=3.6), jq (>=1.5), sqlite3 (>=3.22.0)
+Depends: ${shlibs:Depends}, python3 (>=3.6), jq (>=1.5), sqlite3 (>=3.22.0), nano (>-2.9.3)
 Description: Collect sensor data and store it in PIOT DB
