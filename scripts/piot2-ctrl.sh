@@ -43,11 +43,82 @@ Usage: $0 --action=xxx
 }
 
 # ------------------------------------------------------------------------------
+hook_write() {
+    local config_name=$1
+    local hook_name=$2
+    local hook_path=$3
+
+    echo "\$SCRIPTS_DIR/$hook_name \$CONFIG_DIR/$config_name" >> $hook_path
+}
+
+# ------------------------------------------------------------------------------
+hook_cleanup() {
+    local config_name=$1
+    local hook_path=$2
+    local hook_path_tmp="$hook_path.tmp"
+
+    cat $hook_path | grep -v $config_name > $hook_path_tmp
+    mv $hook_path_tmp $hook_path
+}
+
+# ------------------------------------------------------------------------------
+hook_apply_config() {
+    local config_path=$1
+    local config_name=`basename $config_path`
+    local onCloseConfig=""
+    local clientHookPath="$HOOKS_DIR/piot2-client-hook.sh"
+    local serverHookPath="$HOOKS_DIR/piot2-server-hook.sh"
+
+    # Intro
+    echo "Applying hooks for config:"
+    cat $path
+
+    # Remove old hooks
+    hook_cleanup $config_name $clientHookPath
+    hook_cleanup $config_name $serverHookPath
+
+    # Read config file and apply hooks
+    while IFS= read -r line
+    do
+        # Hooks are located in comments that's why we ignore non-commented lines
+        [[ ! $line =~ ^#.* ]] && continue
+
+        # Remove whitespaces and comments for easy splitting
+        line=`echo "$line" | tr -d " " | tr -d "/#"`
+
+        # Split line into "event:hook:enabled" tokens
+        IFS=':' read -r -a tokens <<< "$line"
+        [ "${#tokens[@]}" -ne 3 ] && continue
+        local event="${tokens[0]}"
+        local hook="${tokens[1]}"
+        local enabled="${tokens[2]}"
+
+        # Ignore disabled hooks
+        [ "$enabled" != "yes" ] && continue
+
+        # OnCloseConfig
+        [ "$event" == "OnCloseConfig" ] && \
+            onCloseConfig=$event
+
+        # OnClientHook
+        [ "$event" == "OnClientHook" ] && \
+            hook_write "$config_name" "$hook" "$clientHookPath"
+
+        # OnServerHook
+        [ "$event" == "OnServerHook" ] && \
+            hook_write "$config_name" "$hook" "$serverHookPath"
+
+    done < "$config_path"
+}
+
+# ------------------------------------------------------------------------------
 create_config() {
     local path=$1
+    local open_editor=$2
 
-    # Create dummy config
-echo '''
+    if [ -n "$open_editor" ]; then
+        # Create dummy config if it's missing
+        [ ! -f "$path" ] && echo '''# Config
 SENSOR_ID="00000000000"
 SENSOR_NAME="br5-bsmt-temp-heater-in"
 SENSOR_TYPE="temperature"
@@ -58,18 +129,20 @@ SERVER_ADDR="localhost"
 SERVER_PORT="8000"
 SERVER_AUTH_TOKEN="qwerty"
 
-# Events:
-#   OnCloseConfig:
-#     piot2-create-sensor-in-db             = yes
+# Hooks:
+#     OnCloseConfig:piot2-create-sensor-in-db.sh    : yes
 #
-#   OnClientHook:
-#     piot2-write-sensor-to-db              = yes
-#     piot2-write-sensor-to-backlog         = no
-#     piot2-send-backlog-to-server          = no
-''' > $path
+#     OnClientHook:piot2-write-sensor-to-db.sh      : yes
+#     OnClientHook:piot2-write-sensor-to-backlog.sh : no
+#     OnClientHook:piot2-send-backlog-to-server.sh  : no
+        ''' > $path
 
-    # Open config file for editing
-    nano $path
+        # Open config file for editing
+        nano $path
+    fi
+
+    # Apply new config
+    hook_apply_config $path
 }
 
 # ------------------------------------------------------------------------------
@@ -120,7 +193,8 @@ server_start() {
 # ------------------------------------------------------------------------------
 create_docker_file() {
     local dest=$1
-echo '''FROM ubuntu:18.04
+
+    echo '''FROM ubuntu:18.04
 
 ENV container docker
 ENV LC_ALL C
@@ -149,7 +223,7 @@ RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
 VOLUME [ "/sys/fs/cgroup" ]
 
 CMD ["/lib/systemd/systemd"]
-''' > $dest
+    ''' > $dest
 }
 
 # ------------------------------------------------------------------------------
@@ -244,10 +318,16 @@ main() {
         ;;
 
         config-create)
-            [ -z "$config" ] \
-                && path="/dev/stdout" \
-                || path="$CONFIG_DIR/$config"
-            create_config $path
+            path="/dev/stdout"
+            if [ -n "$config" ]; then
+                path="$CONFIG_DIR/$config"
+                open_editor=yes
+
+                [ ! -d "$CONFIG_DIR" ] \
+                    && echo "Failed to create config :: target dir is mising" \
+                    && exit 42
+            fi
+            create_config $path $open_editor
         ;;
 
         status-client)
