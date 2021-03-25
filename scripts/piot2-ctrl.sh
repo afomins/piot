@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # Vars
+CONFIG_VERSION="1"
 SCRIPTS_DIR="/opt/piot2"
 HOOKS_DIR="$SCRIPTS_DIR/hooks"
+HOOK_CLIENT="$HOOKS_DIR/piot2-client-hook.sh"
+HOOK_SERVER="$HOOKS_DIR/piot2-server-hook.sh"
 CONFIG_DIR="$SCRIPTS_DIR/cfg"
 DOCKER_IMAGE_NAME="piot2"
 ARGS_NO_CONTAINER=""
@@ -62,87 +65,83 @@ hook_cleanup() {
 }
 
 # ------------------------------------------------------------------------------
-hook_apply_config() {
+hook_client_apply() {
     local config_path=$1
     local config_name=`basename $config_path`
-    local onCloseConfig=""
-    local clientHookPath="$HOOKS_DIR/piot2-client-hook.sh"
-    local serverHookPath="$HOOKS_DIR/piot2-server-hook.sh"
-
-    # Intro
-    echo "Applying hooks for config:"
-    cat $path
 
     # Remove old hooks
-    hook_cleanup $config_name $clientHookPath
-    hook_cleanup $config_name $serverHookPath
+    hook_cleanup $config_name $HOOK_CLIENT
 
-    # Read config file and apply hooks
-    while IFS= read -r line
-    do
-        # Hooks are located in comments that's why we ignore non-commented lines
-        [[ ! $line =~ ^#.* ]] && continue
-
-        # Remove whitespaces and comments for easy splitting
-        line=`echo "$line" | tr -d " " | tr -d "/#"`
-
-        # Split line into "event:hook:enabled" tokens
-        IFS=':' read -r -a tokens <<< "$line"
-        [ "${#tokens[@]}" -ne 3 ] && continue
-        local event="${tokens[0]}"
-        local hook="${tokens[1]}"
-        local enabled="${tokens[2]}"
-
-        # Ignore disabled hooks
-        [ "$enabled" != "yes" ] && continue
-
-        # OnCloseConfig
-        [ "$event" == "OnCloseConfig" ] && \
-            onCloseConfig=$event
-
-        # OnClientHook
-        [ "$event" == "OnClientHook" ] && \
-            hook_write "$config_name" "$hook" "$clientHookPath"
-
-        # OnServerHook
-        [ "$event" == "OnServerHook" ] && \
-            hook_write "$config_name" "$hook" "$serverHookPath"
-
-    done < "$config_path"
+    # Apply hooks from config
+    source $config_path
+    if [ "$SERVER_ENABLED" == "true" ]; then
+        # In server deployment client does following:
+        #  * Saves sensor data to local backlog
+        #  * Tries sending local backlog to remote server
+        echo "Applying client hooks for server deployment:"
+        hook_write "$config_name" "piot2-write-sensor-to-backlog.sh" "$HOOK_CLIENT"
+        hook_write "$config_name" "piot2-send-backlog-to-server.sh" "$HOOK_CLIENT"
+    else
+        # In serverless deployment client writes sensor data directly fo DB
+        echo "Applying client hooks for serverless deployment:"
+        hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_CLIENT"
+    fi
+    cat $HOOK_CLIENT
 }
 
 # ------------------------------------------------------------------------------
-create_config() {
-    local path=$1
-    local open_editor=$2
+hook_server_apply() {
+    local config_path=$1
+    local config_name=`basename $config_path`
 
-    if [ -n "$open_editor" ]; then
-        # Create dummy config if it's missing
-        [ ! -f "$path" ] && echo '''# Config
-SENSOR_ID="00000000000"
-SENSOR_NAME="br5-bsmt-temp-heater-in"
-SENSOR_TYPE="temperature"
-SENSOR_RANDOM="--random"
+    # Remove old hooks
+    hook_cleanup $config_name $HOOK_SERVER
 
-SERVER_PROTO="http"
-SERVER_ADDR="localhost"
-SERVER_PORT="8000"
-SERVER_AUTH_TOKEN="qwerty"
+    # Apply hooks from config
+    echo "Applying server hooks"
+    hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_SERVER"
+    cat $HOOK_SERVER
+}
 
-# Hooks:
-#     OnCloseConfig:piot2-create-sensor-in-db.sh    : yes
-#
-#     OnClientHook:piot2-write-sensor-to-db.sh      : yes
-#     OnClientHook:piot2-write-sensor-to-backlog.sh : no
-#     OnClientHook:piot2-send-backlog-to-server.sh  : no
-        ''' > $path
+# ------------------------------------------------------------------------------
+config_create() {
+    local mode=$1
+    local path=$2
 
-        # Open config file for editing
-        nano $path
+    # Create dummy config
+    if [ "$path" == "/dev/stdout" ] || [ ! -f "$path" ]; then
+        # Common header
+        echo """# Config created @ $(date)
+CONFIG_VERSION=\"$CONFIG_VERSION\"""" > $path
+
+        # Client-only stuff
+        [ "$mode" == "client" ] && echo """
+SENSOR_ID=\"00000000000\"
+SENSOR_NAME=\"br5-bsmt-temp-heater-in\"
+SENSOR_TYPE=\"temperature\"
+SENSOR_RANDOM=\"--random\"""" >> $path
+
+        # Common stuff
+        echo """
+SERVER_ENABLED=\"false\"
+SERVER_PROTO=\"http\"
+SERVER_ADDR=\"localhost\"
+SERVER_PORT=\"8000\"
+SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
     fi
 
-    # Apply new config
-    hook_apply_config $path
+    # Open dummy config for editing
+    if [ "$path" != "/dev/stdout" ]; then
+         nano $path
+
+        # Show final config after editing
+        cat $path && echo
+
+        # Apply hooks from config
+        [ "$mode" == "client" ] && \
+            hook_client_apply $path || \
+            hook_server_apply $path
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -317,17 +316,29 @@ main() {
             source $HOOKS_DIR/piot2-server-hook.sh
         ;;
 
-        config-create)
+        config-*-create)
+            # Validate config destination
             path="/dev/stdout"
             if [ -n "$config" ]; then
                 path="$CONFIG_DIR/$config"
-                open_editor=yes
 
                 [ ! -d "$CONFIG_DIR" ] \
                     && echo "Failed to create config :: target dir is mising" \
                     && exit 42
             fi
-            create_config $path $open_editor
+
+            # Client config
+            if [ "$action" == "config-client-create" ]; then
+                config_create "client" "$path"
+
+            # Server config
+            elif [ "$action" == "config-server-create" ]; then
+                config_create "server" "$path"
+
+            # Unknown
+            else
+                usage
+            fi
         ;;
 
         status-client)
