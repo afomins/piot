@@ -1,7 +1,8 @@
 #!/bin/sh
 set -e
 
-systemctl disable piot2-client.service
-systemctl disable piot2-client.timer
+systemctl disable piot2-client-hook.service
+systemctl disable piot2-client-hook.timer
+systemctl disable piot2-server-hook.service
+systemctl disable piot2-server-hook.timer
 systemctl disable piot2-server.service
-systemctl disable piot2-server.timer

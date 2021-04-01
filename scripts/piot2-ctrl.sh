@@ -146,39 +146,41 @@ SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
 
 # ------------------------------------------------------------------------------
 status_client() {
-    systemctl status piot2-client.timer
+    systemctl status piot2-client-hook
     echo
-    systemctl status piot2-client
+    systemctl status piot2-client-hook.timer
 }
 
 # ------------------------------------------------------------------------------
 status_server() {
-    systemctl status piot2-server.timer
-    echo
     systemctl status piot2-server
+    echo
+    systemctl status piot2-server-hook
+    echo
+    systemctl status piot2-server.timer
 }
 
 # ------------------------------------------------------------------------------
 sensors_enable() {
-echo '''# ds18b20 temperature sensor
+    sudo sh -c "echo '''# ds18b20 temperature sensor
 w1-gpio
 w1-therm
-''' > /etc/modules-load.d/piot2-sensors.conf
+''' > /etc/modules-load.d/piot2-sensors.conf"
     [ $? -eq 0 ] && echo "Successfully added startup modules" \
         || echo "Failed to add startup modules"
-    modprobe w1-gpio && echo "Successfully loaded w1-gpio" \
+    sudo modprobe w1-gpio && echo "Successfully loaded w1-gpio" \
         || echo "Failed to load w1-gpio"
-    modprobe w1-therm && echo "Successfully loaded w1-therm" \
+    sudo modprobe w1-therm && echo "Successfully loaded w1-therm" \
         || echo "Failed to load w1-therm"
 }
 
 # ------------------------------------------------------------------------------
 sensors_disable() {
-    modprobe -r w1-therm && echo "Successfully unloaded w1-therm" \
+    sudo modprobe -r w1-therm && echo "Successfully unloaded w1-therm" \
         || echo "Failed to unload w1-therm"
-    modprobe -r w1-gpio && echo "Successfully unloaded w1-gpio" \
+    sudo modprobe -r w1-gpio && echo "Successfully unloaded w1-gpio" \
         || echo "Failed to unload w1-gpio"
-    rm /etc/modules-load.d/piot2-sensors.conf
+    sudo rm /etc/modules-load.d/piot2-sensors.conf
     [ $? -eq 0 ] && echo "Successfully removed startup modules" \
         || echo "Failed to remove startup modules"
 }
@@ -187,6 +189,15 @@ sensors_disable() {
 server_start() {
     echo "Starting piot2 server"
     /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
+}
+
+# ------------------------------------------------------------------------------
+package_install() {
+    echo "Downloading latest piot2 package"
+    # curl https://bla-bla-bla
+
+    echo "Installing latest piot2 package"
+    sudo apt --yes install ./piot2_0.1.0_all.deb
 }
 
 # ------------------------------------------------------------------------------
@@ -226,6 +237,20 @@ CMD ["/lib/systemd/systemd"]
 }
 
 # ------------------------------------------------------------------------------
+container_test() {
+    (which podman) &> /dev/null; rc=$?
+    if [ $rc -ne 0 ]; then
+        echo """Error: podman is missing! 
+  Install podman by running following shell command -> 
+    sudo apt-get update && sudo apt-get install podman
+
+  Or follow installation instructions here -> 
+    https://podman.io/getting-started/installation"""
+        exit 42
+    fi
+}
+
+# ------------------------------------------------------------------------------
 container_start() {
     local name=$1
     local dockerfile=$2
@@ -240,10 +265,13 @@ container_start() {
         echo "Creating image :: name=$name"
         podman build -f $dockerfile -t $name
 
-        echo "Creating container"
+        sharing_path="/home/$(whoami)/piot/sharing"
+        mkdir -p $sharing_path
+
+        echo "Creating container with shared dir=$sharing_path"
         podman create --name $name \
             --volume /etc/localtime:/etc/localtime:ro \
-            --volume /home/$(whoami)/piot/sharing:/mnt \
+            --volume $sharing_path:/mnt \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
             --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
             $name:latest
@@ -361,24 +389,33 @@ main() {
             server_start
         ;;
 
+        package-install)
+            package_install
+        ;;
+
         container-start)
             dockerfile="/tmp/dockerfile.$name"
+            container_test
             container_start "$name" "$dockerfile"
         ;;
 
         container-stop)
+            container_test
             container_stop "$name"
         ;;
 
         container-delete)
+            container_test
             container_delete "$name"
         ;;
 
         container-status)
+            container_test
             container_status "$name"
         ;;
 
         container-shell)
+            container_test
             container_shell "$name" "$cmd"
         ;;
 
