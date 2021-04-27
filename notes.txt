@@ -60,3 +60,7 @@ podman exec --interactive --tty piot3 /bin/bash
 
 apt-get update
 apt-get install python3 sqlite3 jq
+
+
+
+debuild --no-sign && cp ../piot2_0.1.0_all.deb ~/piot/sharing/ && ~/git/piot/scripts/piot2-ctrl.sh --action=container-shell --cmd="dpkg -i /mnt/piot2_0.1.0_all.deb"

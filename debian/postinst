@@ -5,8 +5,8 @@ adduser --system --no-create-home --force-badname XXpiot2XX
 chown -hR XXpiot2XX /opt/piot2
 chown -hR XXpiot2XX /usr/bin/piot2-ctrl
 
-systemctl enable piot2-client-hook.service
-systemctl enable piot2-client-hook.timer
-systemctl enable piot2-server-hook.service
-systemctl enable piot2-server-hook.timer
-systemctl enable piot2-server.service
+# systemctl enable piot2-client-hook.service
+# systemctl enable piot2-client-hook.timer
+# systemctl enable piot2-server-hook.service
+# systemctl enable piot2-server-hook.timer
+# systemctl enable piot2-server.service

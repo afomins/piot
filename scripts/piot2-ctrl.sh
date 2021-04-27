@@ -46,6 +46,18 @@ Usage: $0 --action=xxx
 }
 
 # ------------------------------------------------------------------------------
+hook_create_if_missing() {
+    [ ! -f "$HOOK_CLIENT" ] && touch $HOOK_CLIENT
+    [ ! -f "$HOOK_SERVER" ] && touch $HOOK_SERVER
+}
+
+# ------------------------------------------------------------------------------
+hook_server_start() {
+    echo "Starting piot2 server"
+    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
+}
+
+# ------------------------------------------------------------------------------
 hook_write() {
     local config_name=$1
     local hook_name=$2
@@ -144,24 +156,135 @@ SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
     fi
 }
 
+
 # ------------------------------------------------------------------------------
-status_client() {
+status_show() {
+    local json="{\"hooks\":{}, \"config\":{}}"
+
+    # Walk hooks files
+    for hook_name in client server; do
+        # State
+        local unit="piot2-$hook_name-hook.timer"
+        local state_active=$(systemctl show -p ActiveState --value $unit)
+        local state_sub=$(systemctl show -p SubState --value $unit)
+        json=$(echo $json | jq -Mc ".hooks.$hook_name.state = \"$state_active:$state_sub\"")
+
+        # Activity
+        if [ "$state_active" == "active" ]; then
+            local activated=$(systemctl show -p ActiveEnterTimestamp --value $unit)
+            local prev_call=$(systemctl show -p LastTriggerUSec --value $unit)
+            local next_call=$(systemctl show -p NextElapseUSecRealtime --value $unit)
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"activated\" = \"$activated\"")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"prev-call\" = \"$prev_call\"")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"next-call\" = \"$next_call\"")
+        fi
+    done
+
+    # Walk all config files
+    for cfg_path in $CONFIG_DIR/*.cfg; do
+        cfg_name=$(basename $cfg_path)
+        cfg_name_masked="\"$cfg_name\""
+        json=$(echo $json | jq -Mc ".config.$cfg_name_masked = {}")
+
+        # Walk hooks files
+        for hook_name in client-hook server-hook; do
+            [ "$hook_name" == "client-hook" ] && hook_path=$HOOK_CLIENT \
+                                              || hook_path=$HOOK_SERVER
+            hook_name="\"$hook_name\""
+            json=$(echo $json| jq -Mc ".config.$cfg_name_masked.$hook_name = []")
+
+            # Search for config being used in hook files
+            while IFS= read -r line; do
+                # Trim whitespaces
+                line=$(echo $line | xargs)
+
+                # Parse line in hook file. 
+                # Example:
+                #     $SCRIPTS_DIR/piot2-write-backlog-to-db.sh $CONFIG_DIR/server.cfg
+                #     $SCRIPTS_DIR/piot2-write-sensor-to-db.sh $CONFIG_DIR/test-000.cfg 
+                IFS='/ ' read l_script_dir l_script l_cfg_dir l_cfg << EOF
+                $line
+EOF
+#                echo "DBG: cfg_name=$cfg_name, l_script_dir=$l_script_dir, l_script=$l_script, l_cfg_dir=$l_cfg_dir, l_cfg=$l_cfg"
+
+                # Validate format of the hook
+                [ "$l_script_dir" != '$SCRIPTS_DIR' ] || [ "$l_cfg_dir" != '$CONFIG_DIR' ] && \
+                    continue
+
+                # Ignore foreign configs
+                [ "$l_cfg" != "$cfg_name" ] && continue
+
+                # Append script to the list of the hooks
+                json=$(echo $json| jq -Mc ".config.$cfg_name_masked.$hook_name += [\"$l_script\"]")
+            done < "$hook_path"
+        done
+    done
+    echo $json | jq
+}
+
+# ------------------------------------------------------------------------------
+client_status() {
     systemctl status piot2-client-hook
     echo
     systemctl status piot2-client-hook.timer
 }
 
 # ------------------------------------------------------------------------------
-status_server() {
+client_enable() {
+    echo "Enabling piot client service"
+    systemctl enable piot2-client-hook
+    systemctl enable piot2-client-hook.timer
+
+    systemctl start piot2-client-hook
+    systemctl start piot2-client-hook.timer
+}
+
+# ------------------------------------------------------------------------------
+client_disable() {
+    echo "Disabling piot client service"
+    systemctl stop piot2-client-hook
+    systemctl stop piot2-client-hook.timer
+
+    systemctl disable piot2-client-hook
+    systemctl disable piot2-client-hook.timer
+}
+
+# ------------------------------------------------------------------------------
+server_status() {
     systemctl status piot2-server
     echo
     systemctl status piot2-server-hook
     echo
-    systemctl status piot2-server.timer
+    systemctl status piot2-server-hook.timer
+}
+
+# ------------------------------------------------------------------------------
+server_enable() {
+    echo "Enabling piot server service"
+    systemctl enable piot2-server
+    systemctl enable piot2-server-hook
+    systemctl enable piot2-server-hook.timer
+
+    systemctl start piot2-server
+    systemctl start piot2-server-hook
+    systemctl start piot2-server-hook.timer
+}
+
+# ------------------------------------------------------------------------------
+server_disable() {
+    echo "Disabling piot server service"
+    systemctl stop piot2-server
+    systemctl stop piot2-server-hook
+    systemctl stop piot2-server-hook.timer
+
+    systemctl disable piot2-server
+    systemctl disable piot2-server-hook
+    systemctl disable piot2-server-hook.timer
 }
 
 # ------------------------------------------------------------------------------
 sensors_enable() {
+    echo "Loading sensor kernel modules"
     sudo sh -c "echo '''# ds18b20 temperature sensor
 w1-gpio
 w1-therm
@@ -176,6 +299,7 @@ w1-therm
 
 # ------------------------------------------------------------------------------
 sensors_disable() {
+    echo "Unloading sensor kernel modules"
     sudo modprobe -r w1-therm && echo "Successfully unloaded w1-therm" \
         || echo "Failed to unload w1-therm"
     sudo modprobe -r w1-gpio && echo "Successfully unloaded w1-gpio" \
@@ -183,12 +307,6 @@ sensors_disable() {
     sudo rm /etc/modules-load.d/piot2-sensors.conf
     [ $? -eq 0 ] && echo "Successfully removed startup modules" \
         || echo "Failed to remove startup modules"
-}
-
-# ------------------------------------------------------------------------------
-server_start() {
-    echo "Starting piot2 server"
-    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
 }
 
 # ------------------------------------------------------------------------------
@@ -336,15 +454,27 @@ main() {
 
     # Run action locally
     case $action in
+        # ----------------------------------------------------------------------
+        # HOOKS
         hook-client)
-            source $HOOKS_DIR/piot2-client-hook.sh
+            hook_create_if_missing
+            source $$HOOK_CLIENT
         ;;
 
         hook-server)
-            source $HOOKS_DIR/piot2-server-hook.sh
+            hook_create_if_missing
+            source $$HOOK_SERVER
         ;;
 
+        hook-server-start)
+            hook_server_start
+        ;;
+
+        # ----------------------------------------------------------------------
+        # CONFIG
         config-*-create)
+            hook_create_if_missing
+
             # Validate config destination
             path="/dev/stdout"
             if [ -n "$config" ]; then
@@ -369,14 +499,43 @@ main() {
             fi
         ;;
 
-        status-client)
-            status_client
+        # ----------------------------------------------------------------------
+        # STATUS
+        status-show)
+            hook_create_if_missing
+            status_show
         ;;
 
-        status-server)
-            status_server
+        # ----------------------------------------------------------------------
+        # CLIENT
+        client-status)
+            client_status
         ;;
 
+        client-enable)
+            client_enable
+        ;;
+
+        client-disable)
+            client_disable
+        ;;
+
+        # ----------------------------------------------------------------------
+        # SERVER
+        server-status)
+            server_status
+        ;;
+
+        server-enable)
+            server_enable
+        ;;
+
+        server-disable)
+            server_disable
+        ;;
+
+        # ----------------------------------------------------------------------
+        # SENSORS
         sensors-enable)
             sensors_enable
         ;;
@@ -385,14 +544,14 @@ main() {
             sensors_disable
         ;;
 
-        server-start)
-            server_start
-        ;;
-
+        # ----------------------------------------------------------------------
+        # PACKAGE
         package-install)
             package_install
         ;;
 
+        # ----------------------------------------------------------------------
+        # CONTAINER
         container-start)
             dockerfile="/tmp/dockerfile.$name"
             container_test
@@ -420,7 +579,7 @@ main() {
         ;;
 
         *)
-            usage
+            status_show
         ;;
     esac
 }
