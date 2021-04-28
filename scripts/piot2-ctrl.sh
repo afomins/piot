@@ -38,27 +38,32 @@ for i in "$@"; do
 done
 
 # ------------------------------------------------------------------------------
-usage () {
+# PRIVATE METHODS
+# ------------------------------------------------------------------------------
+_usage () {
     echo """
 Usage: $0 --action=xxx
 """
     exit 42
 }
 
-# ------------------------------------------------------------------------------
-hook_create_if_missing() {
+_systemd_get_unit_status() {
+    local unit=$1
+    local value=$2
+    systemctl show -p $value --value $unit
+}
+
+_systemd_analyze_timetamp() {
+    local ts=$1
+    systemd-analyze timestamp "$ts" | grep "From now" | awk -F: '{print $2}' | xargs
+}
+
+_hook_create_if_missing() {
     [ ! -f "$HOOK_CLIENT" ] && touch $HOOK_CLIENT
     [ ! -f "$HOOK_SERVER" ] && touch $HOOK_SERVER
 }
 
-# ------------------------------------------------------------------------------
-hook_server_start() {
-    echo "Starting piot2 server"
-    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
-}
-
-# ------------------------------------------------------------------------------
-hook_write() {
+_hook_write() {
     local config_name=$1
     local hook_name=$2
     local hook_path=$3
@@ -66,8 +71,7 @@ hook_write() {
     echo "\$SCRIPTS_DIR/$hook_name \$CONFIG_DIR/$config_name" >> $hook_path
 }
 
-# ------------------------------------------------------------------------------
-hook_cleanup() {
+_hook_cleanup() {
     local config_name=$1
     local hook_path=$2
     local hook_path_tmp="$hook_path.tmp"
@@ -76,13 +80,12 @@ hook_cleanup() {
     mv $hook_path_tmp $hook_path
 }
 
-# ------------------------------------------------------------------------------
-hook_client_apply() {
+_hook_client_apply() {
     local config_path=$1
     local config_name=`basename $config_path`
 
     # Remove old hooks
-    hook_cleanup $config_name $HOOK_CLIENT
+    _hook_cleanup $config_name $HOOK_CLIENT
 
     # Apply hooks from config
     source $config_path
@@ -91,31 +94,85 @@ hook_client_apply() {
         #  * Saves sensor data to local backlog
         #  * Tries sending local backlog to remote server
         echo "Applying client hooks for server deployment:"
-        hook_write "$config_name" "piot2-write-sensor-to-backlog.sh" "$HOOK_CLIENT"
-        hook_write "$config_name" "piot2-send-backlog-to-server.sh" "$HOOK_CLIENT"
+        _hook_write "$config_name" "piot2-write-sensor-to-backlog.sh" "$HOOK_CLIENT"
+        _hook_write "$config_name" "piot2-send-backlog-to-server.sh" "$HOOK_CLIENT"
     else
         # In serverless deployment client writes sensor data directly fo DB
         echo "Applying client hooks for serverless deployment:"
-        hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_CLIENT"
+        _hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_CLIENT"
     fi
     cat $HOOK_CLIENT
 }
 
-# ------------------------------------------------------------------------------
-hook_server_apply() {
+_hook_server_apply() {
     local config_path=$1
     local config_name=`basename $config_path`
 
     # Remove old hooks
-    hook_cleanup $config_name $HOOK_SERVER
+    _hook_cleanup $config_name $HOOK_SERVER
 
     # Apply hooks from config
     echo "Applying server hooks"
-    hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_SERVER"
+    _hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_SERVER"
     cat $HOOK_SERVER
 }
 
+_container_test() {
+    (which podman) &> /dev/null; rc=$?
+    if [ $rc -ne 0 ]; then
+        echo """Error: podman is missing! 
+  Install podman by running following shell command -> 
+    sudo apt-get update && sudo apt-get install podman
+
+  Or follow installation instructions here -> 
+    https://podman.io/getting-started/installation"""
+        exit 42
+    fi
+}
+
+_create_docker_file() {
+    local dest=$1
+
+    echo '''FROM ubuntu:20.04
+
+ENV container docker
+ENV LC_ALL C
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN sed -i "s/# deb/deb/g" /etc/apt/sources.list
+
+RUN apt-get update \
+    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 nano \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+RUN cd /lib/systemd/system/sysinit.target.wants/ \
+    && ls | grep -v systemd-tmpfiles-setup | xargs rm -f $1
+
+RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
+    /etc/systemd/system/*.wants/* \
+    /lib/systemd/system/local-fs.target.wants/* \
+    /lib/systemd/system/sockets.target.wants/*udev* \
+    /lib/systemd/system/sockets.target.wants/*initctl* \
+    /lib/systemd/system/basic.target.wants/* \
+    /lib/systemd/system/anaconda.target.wants/* \
+    /lib/systemd/system/plymouth* \
+    /lib/systemd/system/systemd-update-utmp*
+
+VOLUME [ "/sys/fs/cgroup" ]
+
+CMD ["/lib/systemd/systemd"]
+    ''' > $dest
+}
+
 # ------------------------------------------------------------------------------
+# PUBLIC METHODS
+# ------------------------------------------------------------------------------
+hook_server_start() {
+    echo "Starting piot2 server"
+    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
+}
+
 config_create() {
     local mode=$1
     local path=$2
@@ -151,36 +208,53 @@ SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
 
         # Apply hooks from config
         [ "$mode" == "client" ] && \
-            hook_client_apply $path || \
-            hook_server_apply $path
+            _hook_client_apply $path || \
+            _hook_server_apply $path
     fi
 }
 
-
-# ------------------------------------------------------------------------------
 status_show() {
-    local json="{\"hooks\":{}, \"config\":{}}"
+    local json="{\"hooks\":{}, \"http-server\":{}, \"config\":{}}"
 
-    # Walk hooks files
+    # Hooks
     for hook_name in client server; do
-        # State
+        # State of the timer
         local unit="piot2-$hook_name-hook.timer"
-        local state_active=$(systemctl show -p ActiveState --value $unit)
-        local state_sub=$(systemctl show -p SubState --value $unit)
-        json=$(echo $json | jq -Mc ".hooks.$hook_name.state = \"$state_active:$state_sub\"")
+        local state_active=$(_systemd_get_unit_status $unit "ActiveState")
+        local state_sub=$(_systemd_get_unit_status $unit "SubState")
+        json=$(echo $json | jq -Mc ".hooks.$hook_name.timer.state = \"$state_active:$state_sub\"")
 
-        # Activity
         if [ "$state_active" == "active" ]; then
-            local activated=$(systemctl show -p ActiveEnterTimestamp --value $unit)
-            local prev_call=$(systemctl show -p LastTriggerUSec --value $unit)
-            local next_call=$(systemctl show -p NextElapseUSecRealtime --value $unit)
-            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"activated\" = \"$activated\"")
-            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"prev-call\" = \"$prev_call\"")
-            json=$(echo $json | jq -Mc ".hooks.$hook_name.\"next-call\" = \"$next_call\"")
+            # Activity of the timer
+            local ts_activated=$(_systemd_get_unit_status $unit "ActiveEnterTimestamp")
+            local ts_prev_call=$(_systemd_get_unit_status $unit "LastTriggerUSec")
+            local ts_next_call=$(_systemd_get_unit_status $unit "NextElapseUSecRealtime")
+            local diff_activated=$(_systemd_analyze_timetamp "$ts_activated")
+            local diff_prev_call=$(_systemd_analyze_timetamp "$ts_prev_call")
+            local diff_next_call=$(_systemd_analyze_timetamp "$ts_next_call")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.timer.\"activated\" = \"$ts_activated:$diff_activated\"")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.timer.\"prev-call\" = \"$ts_prev_call:$diff_prev_call\"")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.timer.\"next-call\" = \"$ts_next_call:$diff_next_call\"")
+
+            # State of the unit
+            unit="piot2-$hook_name-hook"
+            state_active=$(_systemd_get_unit_status $unit "ActiveState")
+            state_sub=$(_systemd_get_unit_status $unit "SubState")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.unit.state = \"$state_active:$state_sub\"")
+
+            local ts_exit=$(_systemd_get_unit_status $unit "ExecMainExitTimestamp")
+            local diff_exit=$(_systemd_analyze_timetamp "$ts_exit")
+            json=$(echo $json | jq -Mc ".hooks.$hook_name.unit.\"exit\" = \"$ts_exit:$diff_exit\"")
         fi
     done
 
-    # Walk all config files
+    # Http server
+    local unit="piot2-server.timer"
+    local state_active=$(_systemd_get_unit_status $unit "ActiveState")
+    local state_sub=$(_systemd_get_unit_status $unit "SubState")
+    json=$(echo $json | jq -Mc ".\"http-server\".state = \"$state_active:$state_sub\"")
+
+    # Configs
     for cfg_path in $CONFIG_DIR/*.cfg; do
         cfg_name=$(basename $cfg_path)
         cfg_name_masked="\"$cfg_name\""
@@ -222,14 +296,6 @@ EOF
     echo $json | jq
 }
 
-# ------------------------------------------------------------------------------
-client_status() {
-    systemctl status piot2-client-hook
-    echo
-    systemctl status piot2-client-hook.timer
-}
-
-# ------------------------------------------------------------------------------
 client_enable() {
     echo "Enabling piot client service"
     systemctl enable piot2-client-hook
@@ -239,7 +305,6 @@ client_enable() {
     systemctl start piot2-client-hook.timer
 }
 
-# ------------------------------------------------------------------------------
 client_disable() {
     echo "Disabling piot client service"
     systemctl stop piot2-client-hook
@@ -249,16 +314,6 @@ client_disable() {
     systemctl disable piot2-client-hook.timer
 }
 
-# ------------------------------------------------------------------------------
-server_status() {
-    systemctl status piot2-server
-    echo
-    systemctl status piot2-server-hook
-    echo
-    systemctl status piot2-server-hook.timer
-}
-
-# ------------------------------------------------------------------------------
 server_enable() {
     echo "Enabling piot server service"
     systemctl enable piot2-server
@@ -270,7 +325,6 @@ server_enable() {
     systemctl start piot2-server-hook.timer
 }
 
-# ------------------------------------------------------------------------------
 server_disable() {
     echo "Disabling piot server service"
     systemctl stop piot2-server
@@ -282,7 +336,6 @@ server_disable() {
     systemctl disable piot2-server-hook.timer
 }
 
-# ------------------------------------------------------------------------------
 sensors_enable() {
     echo "Loading sensor kernel modules"
     sudo sh -c "echo '''# ds18b20 temperature sensor
@@ -297,7 +350,6 @@ w1-therm
         || echo "Failed to load w1-therm"
 }
 
-# ------------------------------------------------------------------------------
 sensors_disable() {
     echo "Unloading sensor kernel modules"
     sudo modprobe -r w1-therm && echo "Successfully unloaded w1-therm" \
@@ -309,7 +361,6 @@ sensors_disable() {
         || echo "Failed to remove startup modules"
 }
 
-# ------------------------------------------------------------------------------
 package_install() {
     echo "Downloading latest piot2 package"
     # curl https://bla-bla-bla
@@ -318,57 +369,6 @@ package_install() {
     sudo apt --yes install ./piot2_0.1.0_all.deb
 }
 
-# ------------------------------------------------------------------------------
-create_docker_file() {
-    local dest=$1
-
-    echo '''FROM ubuntu:18.04
-
-ENV container docker
-ENV LC_ALL C
-ENV DEBIAN_FRONTEND noninteractive
-
-RUN sed -i "s/# deb/deb/g" /etc/apt/sources.list
-
-RUN apt-get update \
-    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 nano \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-RUN cd /lib/systemd/system/sysinit.target.wants/ \
-    && ls | grep -v systemd-tmpfiles-setup | xargs rm -f $1
-
-RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
-    /etc/systemd/system/*.wants/* \
-    /lib/systemd/system/local-fs.target.wants/* \
-    /lib/systemd/system/sockets.target.wants/*udev* \
-    /lib/systemd/system/sockets.target.wants/*initctl* \
-    /lib/systemd/system/basic.target.wants/* \
-    /lib/systemd/system/anaconda.target.wants/* \
-    /lib/systemd/system/plymouth* \
-    /lib/systemd/system/systemd-update-utmp*
-
-VOLUME [ "/sys/fs/cgroup" ]
-
-CMD ["/lib/systemd/systemd"]
-    ''' > $dest
-}
-
-# ------------------------------------------------------------------------------
-container_test() {
-    (which podman) &> /dev/null; rc=$?
-    if [ $rc -ne 0 ]; then
-        echo """Error: podman is missing! 
-  Install podman by running following shell command -> 
-    sudo apt-get update && sudo apt-get install podman
-
-  Or follow installation instructions here -> 
-    https://podman.io/getting-started/installation"""
-        exit 42
-    fi
-}
-
-# ------------------------------------------------------------------------------
 container_start() {
     local name=$1
     local dockerfile=$2
@@ -378,7 +378,7 @@ container_start() {
     (podman image exists $name) &> /dev/null; rc=$?
     if [ $rc -ne 0 ]; then
         echo "Creating docker file :: path=$dockerfile"
-        create_docker_file $dockerfile
+        _create_docker_file $dockerfile
 
         echo "Creating image :: name=$name"
         podman build -f $dockerfile -t $name
@@ -406,7 +406,6 @@ container_start() {
     podman ps --filter name=$name
 }
 
-# ------------------------------------------------------------------------------
 container_stop() {
     local name=$1
 
@@ -414,7 +413,6 @@ container_stop() {
     podman stop $name
 }
 
-# ------------------------------------------------------------------------------
 container_delete() {
     local name=$1
 
@@ -424,13 +422,11 @@ container_delete() {
     podman rmi --force $name
 }
 
-# ------------------------------------------------------------------------------
 container_status() {
     local name=$1
     podman ps -all --filter name=$name
 }
 
-# ------------------------------------------------------------------------------
 container_shell() {
     local name=$1
     local cmd=$2
@@ -439,6 +435,8 @@ container_shell() {
     eval podman exec --interactive --tty "$name" "$cmd"
 }
 
+# ------------------------------------------------------------------------------
+# MAIN
 # ------------------------------------------------------------------------------
 main() {
     local name=$DOCKER_IMAGE_NAME
@@ -457,13 +455,13 @@ main() {
         # ----------------------------------------------------------------------
         # HOOKS
         hook-client)
-            hook_create_if_missing
-            source $$HOOK_CLIENT
+            _hook_create_if_missing
+            source $HOOK_CLIENT
         ;;
 
         hook-server)
-            hook_create_if_missing
-            source $$HOOK_SERVER
+            _hook_create_if_missing
+            source $HOOK_SERVER
         ;;
 
         hook-server-start)
@@ -473,7 +471,7 @@ main() {
         # ----------------------------------------------------------------------
         # CONFIG
         config-*-create)
-            hook_create_if_missing
+            _hook_create_if_missing
 
             # Validate config destination
             path="/dev/stdout"
@@ -495,23 +493,12 @@ main() {
 
             # Unknown
             else
-                usage
+                _usage
             fi
         ;;
 
         # ----------------------------------------------------------------------
-        # STATUS
-        status-show)
-            hook_create_if_missing
-            status_show
-        ;;
-
-        # ----------------------------------------------------------------------
         # CLIENT
-        client-status)
-            client_status
-        ;;
-
         client-enable)
             client_enable
         ;;
@@ -522,10 +509,6 @@ main() {
 
         # ----------------------------------------------------------------------
         # SERVER
-        server-status)
-            server_status
-        ;;
-
         server-enable)
             server_enable
         ;;
@@ -554,31 +537,32 @@ main() {
         # CONTAINER
         container-start)
             dockerfile="/tmp/dockerfile.$name"
-            container_test
+            _container_test
             container_start "$name" "$dockerfile"
         ;;
 
         container-stop)
-            container_test
+            _container_test
             container_stop "$name"
         ;;
 
         container-delete)
-            container_test
+            _container_test
             container_delete "$name"
         ;;
 
         container-status)
-            container_test
+            _container_test
             container_status "$name"
         ;;
 
         container-shell)
-            container_test
+            _container_test
             container_shell "$name" "$cmd"
         ;;
 
         *)
+            _hook_create_if_missing
             status_show
         ;;
     esac
