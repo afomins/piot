@@ -7,6 +7,7 @@ HOOKS_DIR="$SCRIPTS_DIR/hooks"
 HOOK_CLIENT="$HOOKS_DIR/piot2-client-hook.sh"
 HOOK_SERVER="$HOOKS_DIR/piot2-server-hook.sh"
 CONFIG_DIR="$SCRIPTS_DIR/cfg"
+DB_PATH="$CONFIG_DIR/piot.sqlite"
 DOCKER_IMAGE_NAME="piot2"
 ARGS_NO_CONTAINER=""
 
@@ -99,9 +100,9 @@ _hook_client_apply() {
     else
         # In serverless deployment client writes sensor data directly fo DB
         echo "Applying client hooks for serverless deployment:"
+        _hook_write "$config_name" "piot2-create-sensor-in-db.sh" "$HOOK_CLIENT"
         _hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_CLIENT"
     fi
-    cat $HOOK_CLIENT
 }
 
 _hook_server_apply() {
@@ -114,7 +115,6 @@ _hook_server_apply() {
     # Apply hooks from config
     echo "Applying server hooks"
     _hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_SERVER"
-    cat $HOOK_SERVER
 }
 
 _container_test() {
@@ -163,6 +163,42 @@ VOLUME [ "/sys/fs/cgroup" ]
 
 CMD ["/lib/systemd/systemd"]
     ''' > $dest
+}
+
+_service_enable() {
+    local unit=$1
+    echo "Enabling piot $unit service"
+
+    # Enable&start hooks
+    systemctl enable piot2-$unit-hook
+    systemctl enable piot2-$unit-hook.timer
+
+    systemctl start piot2-$unit-hook
+    systemctl start piot2-$unit-hook.timer
+
+    # Enable&start server
+    if [ "$unit" == "server" ]; then
+        systemctl enable piot2-server
+        systemctl start piot2-server
+    fi
+}
+
+_service_disable() {
+    local unit=$1
+    echo "Disabling piot $unit service"
+
+    # Disable&stop hooks
+    systemctl stop piot2-$unit-hook
+    systemctl stop piot2-$unit-hook.timer
+
+    systemctl disable piot2-$unit-hook
+    systemctl disable piot2-$unit-hook.timer
+
+    # Disable&stop server
+    if [ "$unit" == "server" ]; then
+        systemctl stop piot2-server
+        systemctl disable piot2-server
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -214,7 +250,7 @@ SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
 }
 
 status_show() {
-    local json="{\"hooks\":{}, \"http-server\":{}, \"config\":{}}"
+    local json="{\"hooks\":{}, \"http-server\":{}, \"config\":{}, \"db\":{}}"
 
     # Hooks
     for hook_name in client server; do
@@ -276,9 +312,7 @@ status_show() {
                 # Example:
                 #     $SCRIPTS_DIR/piot2-write-backlog-to-db.sh $CONFIG_DIR/server.cfg
                 #     $SCRIPTS_DIR/piot2-write-sensor-to-db.sh $CONFIG_DIR/test-000.cfg 
-                IFS='/ ' read l_script_dir l_script l_cfg_dir l_cfg << EOF
-                $line
-EOF
+                IFS='/ ' read l_script_dir l_script l_cfg_dir l_cfg <<< $line
 #                echo "DBG: cfg_name=$cfg_name, l_script_dir=$l_script_dir, l_script=$l_script, l_cfg_dir=$l_cfg_dir, l_cfg=$l_cfg"
 
                 # Validate format of the hook
@@ -293,47 +327,14 @@ EOF
             done < "$hook_path"
         done
     done
+
+    # Db
+    [ -f "$DB_PATH" ] && db_path="\"$DB_PATH\"" \
+                      || db_path="null"
+    json=$(echo $json| jq -Mc ".db.path = $db_path")
+
+    # Dump
     echo $json | jq
-}
-
-client_enable() {
-    echo "Enabling piot client service"
-    systemctl enable piot2-client-hook
-    systemctl enable piot2-client-hook.timer
-
-    systemctl start piot2-client-hook
-    systemctl start piot2-client-hook.timer
-}
-
-client_disable() {
-    echo "Disabling piot client service"
-    systemctl stop piot2-client-hook
-    systemctl stop piot2-client-hook.timer
-
-    systemctl disable piot2-client-hook
-    systemctl disable piot2-client-hook.timer
-}
-
-server_enable() {
-    echo "Enabling piot server service"
-    systemctl enable piot2-server
-    systemctl enable piot2-server-hook
-    systemctl enable piot2-server-hook.timer
-
-    systemctl start piot2-server
-    systemctl start piot2-server-hook
-    systemctl start piot2-server-hook.timer
-}
-
-server_disable() {
-    echo "Disabling piot server service"
-    systemctl stop piot2-server
-    systemctl stop piot2-server-hook
-    systemctl stop piot2-server-hook.timer
-
-    systemctl disable piot2-server
-    systemctl disable piot2-server-hook
-    systemctl disable piot2-server-hook.timer
 }
 
 sensors_enable() {
@@ -383,13 +384,17 @@ container_start() {
         echo "Creating image :: name=$name"
         podman build -f $dockerfile -t $name
 
-        sharing_path="/home/$(whoami)/piot/sharing"
-        mkdir -p $sharing_path
+        mnt_path="/home/$(whoami)/piot/mnt"
+        mkdir -p $mnt_path
 
-        echo "Creating container with shared dir=$sharing_path"
+        data_path="/home/$(whoami)/piot/data"
+        mkdir -p $data_path
+
+        echo "Creating container mnt=$mnt_path data=$data_path"
         podman create --name $name \
             --volume /etc/localtime:/etc/localtime:ro \
-            --volume $sharing_path:/mnt \
+            --volume $mnt_path:/mnt \
+            --volume $data_path:/opt/piot2 \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
             --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
             $name:latest
@@ -470,7 +475,7 @@ main() {
 
         # ----------------------------------------------------------------------
         # CONFIG
-        config-*-create)
+        config-client-create|config-server-create)
             _hook_create_if_missing
 
             # Validate config destination
@@ -495,36 +500,22 @@ main() {
             else
                 _usage
             fi
+            status_show
         ;;
 
         # ----------------------------------------------------------------------
-        # CLIENT
-        client-enable)
-            client_enable
-        ;;
-
-        client-disable)
-            client_disable
-        ;;
-
-        # ----------------------------------------------------------------------
-        # SERVER
-        server-enable)
-            server_enable
-        ;;
-
-        server-disable)
-            server_disable
+        # SERVICE UNIT STATUS
+        client-enable|client-disable|server-enable|server-disable)
+            IFS='-' read unit_name unit_status <<< $action
+            [ "$unit_status" == "enable" ]  && _service_enable "$unit_name"
+            [ "$unit_status" == "disable" ] && _service_disable "$unit_name"
         ;;
 
         # ----------------------------------------------------------------------
         # SENSORS
-        sensors-enable)
-            sensors_enable
-        ;;
-
-        sensors-disable)
-            sensors_disable
+        sensors-enable|sensors-disable)
+            [ "$action" == "sensors-enable" ] && sensors_enable \
+                                              || sensors_disable
         ;;
 
         # ----------------------------------------------------------------------
