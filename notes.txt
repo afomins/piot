@@ -1,10 +1,10 @@
 Create docker container:
-    sudo docker run -d \
+    podman run -d \
      -p 3000:3000 \
-     -v $PWD:/piot \
+     -v ~/piot/data/cfg:/piot \
      --net="host" \
-     --name=grafana \
-     -e "GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,frser-sqlite-datasource" \
+     --name=piot2-grafana \
+     -e "GF_INSTALL_PLUGINS=grafana-clock-panel,frser-sqlite-datasource" \
      grafana/grafana:latest-ubuntu
 
     sudo docker start grafana
