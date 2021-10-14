@@ -2,13 +2,15 @@
 
 # Vars
 CONFIG_VERSION="1"
+APP_VERSION="v0.1.0"
 SCRIPTS_DIR="/opt/piot2"
 HOOKS_DIR="$SCRIPTS_DIR/hooks"
 HOOK_CLIENT="$HOOKS_DIR/piot2-client-hook.sh"
 HOOK_SERVER="$HOOKS_DIR/piot2-server-hook.sh"
 CONFIG_DIR="$SCRIPTS_DIR/cfg"
 DB_PATH="$CONFIG_DIR/piot.sqlite"
-DOCKER_IMAGE_NAME="piot2"
+CONTAINER_NAME_PIOT2="piot2"
+CONTAINER_NAME_GRAFANA="piot2-grafana"
 ARGS_NO_CONTAINER=""
 
 # Parse arguments
@@ -57,6 +59,10 @@ _systemd_get_unit_status() {
 _systemd_analyze_timetamp() {
     local ts=$1
     systemd-analyze timestamp "$ts" | grep "From now" | awk -F: '{print $2}' | xargs
+}
+
+_is_installed() {
+    [[ -d "$SCRIPTS_DIR" ]]
 }
 
 _hook_create_if_missing() {
@@ -250,7 +256,19 @@ SERVER_AUTH_TOKEN=\"qwerty\"""" >> $path
 }
 
 status_show() {
-    local json="{\"hooks\":{}, \"http-server\":{}, \"config\":{}, \"db\":{}}"
+    local json="{\"app\":{}, \"hooks\":{}, \"http-server\":{}, \"config\":{}, \"db\":{}}"
+
+    # App
+    local tmp=`_is_installed && echo true || echo false`
+    json=$(echo $json | jq -Mc ".app.\"has-piot2\" = $tmp")
+
+    tmp=`podman container exists $CONTAINER_NAME_PIOT2 &> /dev/null && echo true || echo false`
+    json=$(echo $json | jq -Mc ".app.\"has-container-piot2\" = $tmp")
+
+    tmp=`podman container exists $CONTAINER_NAME_GRAFANA &> /dev/null && echo true || echo false`
+    json=$(echo $json | jq -Mc ".app.\"has-container-grafana\" = $tmp")
+    json=$(echo $json | jq -Mc ".app.\"version-config\" = \"$CONFIG_VERSION\"")
+    json=$(echo $json | jq -Mc ".app.\"version-app\" = \"$APP_VERSION\"")
 
     # Hooks
     for hook_name in client server; do
@@ -291,7 +309,7 @@ status_show() {
     json=$(echo $json | jq -Mc ".\"http-server\".state = \"$state_active:$state_sub\"")
 
     # Configs
-    for cfg_path in $CONFIG_DIR/*.cfg; do
+    _is_installed && for cfg_path in $CONFIG_DIR/*.cfg; do
         cfg_name=$(basename $cfg_path)
         cfg_name_masked="\"$cfg_name\""
         json=$(echo $json | jq -Mc ".config.$cfg_name_masked = {}")
@@ -362,15 +380,7 @@ sensors_disable() {
         || echo "Failed to remove startup modules"
 }
 
-package_install() {
-    echo "Downloading latest piot2 package"
-    # curl https://bla-bla-bla
-
-    echo "Installing latest piot2 package"
-    sudo apt --yes install ./piot2_0.1.0_all.deb
-}
-
-container_start() {
+container_piot2_start() {
     local name=$1
     local dockerfile=$2
     local rc=0
@@ -384,10 +394,10 @@ container_start() {
         echo "Creating image :: name=$name"
         podman build -f $dockerfile -t $name
 
-        mnt_path="/home/$(whoami)/piot/mnt"
+        mnt_path="/home/$(whoami)/piot2/mnt"
         mkdir -p $mnt_path
 
-        data_path="/home/$(whoami)/piot/data"
+        data_path="/home/$(whoami)/piot2/data"
         mkdir -p $data_path
 
         echo "Creating container mnt=$mnt_path data=$data_path"
@@ -398,6 +408,38 @@ container_start() {
             --volume /sys/fs/cgroup:/sys/fs/cgroup:ro \
             --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
             $name:latest
+    fi
+
+    # Start container if it's not running
+    (podman ps --filter name=$name --filter status=running | grep $name) &> /dev/null; rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "Starting container :: name=$name"
+        podman start $name
+    else
+        echo "Container is already running :: name=$name"
+    fi
+    podman ps --filter name=$name
+}
+
+container_grafana_start() {
+    local name=$1
+    local dockerfile=$2
+    local rc=0
+
+    # Create image if it's absent
+    (podman image exists $name) &> /dev/null; rc=$?
+    if [ $rc -ne 0 ]; then
+        data_path="/home/$(whoami)/piot2/data"
+        mkdir -p $data_path
+
+        echo "Creating grafana container :: path=$dockerfile"
+        podman run -d \
+            -p 3000:3000 \
+            -v $PWD:/piot2 \
+            --net="host" \
+            --name=$name \
+            -e "GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,frser-sqlite-datasource" \
+            grafana/grafana:latest-ubuntu
     fi
 
     # Start container if it's not running
@@ -444,16 +486,19 @@ container_shell() {
 # MAIN
 # ------------------------------------------------------------------------------
 main() {
-    local name=$DOCKER_IMAGE_NAME
     local action=$ARGS_ACTION
     local cmd=$ARGS_CMD
     local config=$ARGS_CONFIG_NAME
 
     # Rus action in container
     if [ -n "$ARGS_IN_CONTAINER" ]; then
-        container_shell "$name" "piot2-ctrl $ARGS_NO_CONTAINER"
+        container_shell "$CONTAINER_NAME_PIOT2" "piot2-ctrl $ARGS_NO_CONTAINER"
         exit $?
     fi
+
+    # Get name of the continer we are working with now 
+    local name=`(echo $action | grep container-grafana &> /dev/null) && \
+        echo $CONTAINER_NAME_GRAFANA || echo $CONTAINER_NAME_PIOT2`
 
     # Run action locally
     case $action in
@@ -519,41 +564,39 @@ main() {
         ;;
 
         # ----------------------------------------------------------------------
-        # PACKAGE
-        package-install)
-            package_install
-        ;;
-
-        # ----------------------------------------------------------------------
         # CONTAINER
-        container-start)
-            dockerfile="/tmp/dockerfile.$name"
+        container-start|container-grafana-start)
             _container_test
-            container_start "$name" "$dockerfile"
+            dockerfile="/tmp/dockerfile.$name"
+            [ "$action" == "container-start" ]     && \
+                container_piot2_start "$name" "$dockerfile"       || 
+                container_grafana_start "$name" "$dockerfile"
         ;;
 
-        container-stop)
+        container-stop|container-grafana-stop)
             _container_test
             container_stop "$name"
         ;;
 
-        container-delete)
+        container-delete|container-grafana-delete)
             _container_test
             container_delete "$name"
         ;;
 
-        container-status)
+        container-status|container-grafana-status)
             _container_test
             container_status "$name"
         ;;
 
-        container-shell)
+        container-shell|container-grafana-shell)
             _container_test
             container_shell "$name" "$cmd"
         ;;
 
+        # ----------------------------------------------------------------------
+        # STATUS
         *)
-            _hook_create_if_missing
+            _is_installed && _hook_create_if_missing
             status_show
         ;;
     esac
