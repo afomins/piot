@@ -12,6 +12,7 @@ DB_PATH="$CONFIG_DIR/piot.sqlite"
 CONTAINER_NAME_PIOT2="piot2"
 CONTAINER_NAME_GRAFANA="piot2-grafana"
 ARGS_NO_CONTAINER=""
+ARGS_DEB_PATH="./piot2*.deb"
 
 # Parse arguments
 for i in "$@"; do
@@ -33,6 +34,11 @@ for i in "$@"; do
         --cmd=*)
         ARGS_CMD="${i#*=}"
         ARGS_NO_CONTAINER+=" --cmd=$ARGS_CMD"
+        shift
+        ;;
+        --deb-path=*)
+        ARGS_DEB_PATH="${i#*=}"
+        ARGS_NO_CONTAINER+=" --deb-path=$ARGS_DEB_PATH"
         shift
         ;;
         *)
@@ -260,15 +266,16 @@ status_show() {
 
     # App
     local tmp=`_is_installed && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.\"has-piot2\" = $tmp")
+    json=$(echo $json | jq -Mc ".app.deployed.\"on-host\" = $tmp")
 
     tmp=`podman container exists $CONTAINER_NAME_PIOT2 &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.\"has-container-piot2\" = $tmp")
+    json=$(echo $json | jq -Mc ".app.deployed.\"in-container-piot2\" = $tmp")
 
     tmp=`podman container exists $CONTAINER_NAME_GRAFANA &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.\"has-container-grafana\" = $tmp")
-    json=$(echo $json | jq -Mc ".app.\"version-config\" = \"$CONFIG_VERSION\"")
-    json=$(echo $json | jq -Mc ".app.\"version-app\" = \"$APP_VERSION\"")
+    json=$(echo $json | jq -Mc ".app.deployed.\"in-container-grafana\" = $tmp")
+    json=$(echo $json | jq -Mc ".app.version.app = \"$APP_VERSION\"")
+    json=$(echo $json | jq -Mc ".app.version.config = \"$CONFIG_VERSION\"")
+    json=$(echo $json | jq -Mc ".app.\"deb-path\" = \"$ARGS_DEB_PATH\"")
 
     # Hooks
     for hook_name in client server; do
