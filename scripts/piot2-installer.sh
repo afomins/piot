@@ -39,8 +39,17 @@ Usage: $0 --action=xxx
     exit 42
 }
 
+_echo_bool() {
+    [ $? -eq 0 ] && echo true || echo false
+}
+
 _is_installed() {
     [[ -d "$DIR_HOOKS" ]]
+}
+
+_container_show_status() {
+    local name=$1
+    podman ps -all --filter name=$name
 }
 
 _container_test() {
@@ -50,6 +59,11 @@ _container_test() {
   https://podman.io/getting-started/installation"""
         exit 42
     fi
+}
+
+_container_is_running() {
+    local name=$1
+    podman ps --filter name=$name --filter status=running | grep $name &> /dev/null
 }
 
 _container_piot2_create() {
@@ -111,11 +125,6 @@ CMD ["/lib/systemd/systemd"]
 # ------------------------------------------------------------------------------
 # PUBLIC METHODS
 # ------------------------------------------------------------------------------
-container_status() {
-    local name=$1
-    podman ps -all --filter name=$name
-}
-
 container_shell() {
     local name=$1
     local cmd=$2
@@ -126,10 +135,9 @@ container_shell() {
 
 container_start() {
     local name=$1
-    local rc=0
 
-    (podman ps --filter name=$name --filter status=running | grep $name) &> /dev/null; rc=$?
-    if [ $rc -ne 0 ]; then
+    _container_is_running $name
+    if [ $? -ne 0 ]; then
         echo "Starting container :: name=$name"
         podman start $name
     else
@@ -138,19 +146,56 @@ container_start() {
     podman ps --filter name=$name
 }
 
+container_stop() {
+    local name=$1
+
+    _container_is_running $name
+    if [ $? -ne 0 ]; then
+        echo "Container is not running :: name=$name"
+    else
+        echo "Stopping container :: name=$name"
+        podman stop $name
+    fi
+    podman ps --filter name=$name
+}
+
+container_install_deb() {
+    local name=$1
+    local deb_path=$2
+    local deb_name=`basename $deb_path`
+
+    echo "Installing deb in container :: name=$name deb=$deb_path"
+    cp $deb_path ./mnt && \
+        container_shell $ARGS_CONTAINER_NAME "dpkg -i /mnt/$deb_name"
+}
+
 status_show() {
     local json="{}"
 
-    local tmp=`_is_installed && echo true || echo false`
-    json=$(echo $json | jq -Mc ".\"piot2-deployed\" = $tmp")
-
-    tmp=`podman container exists $CONTAINER_PIOT2 &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".\"container-$CONTAINER_PIOT2\" = $tmp")
-
-    tmp=`podman container exists $CONTAINER_GRAFANA &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".\"container-$CONTAINER_GRAFANA\" = $tmp")
-
+    # deb-path
     json=$(echo $json | jq -Mc ".\"deb-path\" = \"$ARGS_DEB_PATH\"")
+
+    # container.piot2.is-installed
+    tmp=`podman container exists $CONTAINER_PIOT2 &> /dev/null; _echo_bool`
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"is-installed\" = $tmp")
+
+    # container.piot2.is-running
+    tmp=`_container_is_running $CONTAINER_PIOT2; _echo_bool`
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"is-running\" = $tmp")
+
+    # container.piot2.deb-version
+    cmd="dpkg -S piot2 &> /dev/null && dpkg-query --showformat='\${Version}' --show piot2 || echo null\""
+    tmp=`_container_is_running $CONTAINER_PIOT2 && \
+        container_shell $CONTAINER_PIOT2 "$cmd"`
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"deb-version\" = \"$tmp\"")
+
+    # container.piot2-grafana.is-installed
+    tmp=`podman container exists $CONTAINER_GRAFANA &> /dev/null; _echo_bool`
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_GRAFANA\".\"is-installed\" = $tmp")
+
+    # container.piot2-grafana.is-running
+    tmp=`_container_is_running $CONTAINER_GRAFANA; _echo_bool`
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_GRAFANA\".\"is-running\" = $tmp")
 
     # Dump
     echo $json | jq
@@ -162,20 +207,16 @@ status_show() {
 main() {
     local action=$ARGS_ACTION
     local container=$ARGS_CONTAINER_NAME
+    local deb_path=$ARGS_DEB_PATH
 
     # Run action locally
     case $action in
-        container-shell)
+        shell)
             _container_test
             container_shell "$container"
         ;;
 
-        container-status)
-            _container_test
-            container_status "$container"
-        ;;
-
-        container-start)
+        start)
             _container_test
             [ "$container" == "$CONTAINER_PIOT2" ] && \
                 _container_piot2_create || \
@@ -184,8 +225,16 @@ main() {
             container_start "$container"
         ;;
 
-        # ----------------------------------------------------------------------
-        # STATUS
+        stop)
+            _container_test
+            container_stop "$container"
+        ;;
+
+        install-deb)
+            _container_test
+            container_install_deb "$container" "$deb_path"
+        ;;
+
         *|status)
             status_show
         ;;
