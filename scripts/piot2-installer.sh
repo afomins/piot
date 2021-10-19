@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Vars
+PKG_NAME="piot2"
 DIR_SCRIPTS="/opt/piot2"
 DIR_HOOKS="$DIR_SCRIPTS/hooks"
 CONTAINER_PIOT2="piot2"
@@ -8,7 +9,7 @@ CONTAINER_GRAFANA="piot2-grafana"
 
 # Parse arguments
 ARGS_ACTION="status"
-ARGS_DEB_PATH=`(ls piot2*.deb 2> /dev/null || echo darn...piot2-deb-not-found) | head -n1`
+ARGS_DEB_PATH=`(ls piot2*.deb 2> /dev/null || echo piot2-not-found.deb) | head -n1`
 ARGS_CONTAINER_NAME="piot2"
 for i in "$@"; do
     case $i in
@@ -122,15 +123,37 @@ CMD ["/lib/systemd/systemd"]
         $name:latest
 }
 
+_container_grafana_create() {
+    local name="$CONTAINER_GRAFANA"
+    local rc=0
+
+    # Return if images exists
+    (podman image exists $name) &> /dev/null; rc=$?
+    [ $rc -eq 0 ] && return
+
+    echo "Creating grafana container :: name=$name"
+    podman run -d \
+        --volume $PWD/data/cfg:/piot2 \
+        --net="host" \
+        --name=$name \
+        -e "GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,frser-sqlite-datasource" \
+        grafana/grafana:latest-ubuntu
+}
+
 # ------------------------------------------------------------------------------
 # PUBLIC METHODS
 # ------------------------------------------------------------------------------
 container_shell() {
     local name=$1
     local cmd=$2
+    local interactive=""
 
-    [ -z "$cmd" ] && cmd="/bin/bash" # Run bash by default
-    eval podman exec --interactive --tty "$name" "$cmd"
+    # Run interactive bash by default
+    [ -z "$cmd" ]                               &&
+        interactive="--interactive --tty"       && 
+        cmd="/bin/bash"
+
+    eval podman exec $interactive "$name" "bash -c '$cmd'"
 }
 
 container_start() {
@@ -172,9 +195,6 @@ container_install_deb() {
 status_show() {
     local json="{}"
 
-    # deb-path
-    json=$(echo $json | jq -Mc ".\"deb-path\" = \"$ARGS_DEB_PATH\"")
-
     # container.piot2.is-installed
     tmp=`podman container exists $CONTAINER_PIOT2 &> /dev/null; _echo_bool`
     json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"is-installed\" = $tmp")
@@ -184,10 +204,11 @@ status_show() {
     json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"is-running\" = $tmp")
 
     # container.piot2.deb-version
-    cmd="dpkg -S piot2 &> /dev/null && dpkg-query --showformat='\${Version}' --show piot2 || echo null\""
+    cmd="dpkg -S $PKG_NAME > /dev/null 2>&1 && dpkg-query --show $PKG_NAME | cut -f2 || echo null"
     tmp=`_container_is_running $CONTAINER_PIOT2 && \
         container_shell $CONTAINER_PIOT2 "$cmd"`
-    json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"deb-version\" = \"$tmp\"")
+    [ "$tmp" != "null" ] && tmp="\"$tmp\""
+    json=$(echo $json | jq -Mc ".\"$CONTAINER_PIOT2\".\"deb-version\" = $tmp")
 
     # container.piot2-grafana.is-installed
     tmp=`podman container exists $CONTAINER_GRAFANA &> /dev/null; _echo_bool`
