@@ -62,4 +62,17 @@ apt-get install python3 sqlite3 jq
 
 debuild --no-sign && cp ../piot2_0.1.0_all.deb ~/piot/mnt/ && ~/git/piot/scripts/piot2-ctrl.sh --action=container-shell --cmd="dpkg -i /mnt/piot2_0.1.0_all.deb"
 
+vi wpa_supplicant.conf
+country=US
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
 
+network={
+    ssid="WIFI_SSID"
+    scan_ssid=1
+    psk="WIFI_PASSWORD"
+    key_mgmt=WPA-PSK
+}
+
+dtoverlay=w1-gpio
+enable_uart=1

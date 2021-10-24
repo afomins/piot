@@ -1130,7 +1130,7 @@ class ActionBacklogRead(ActionBacklog):
 #---------------------------------------------------------------------------------------------------
 class ActionReadSensorDs18b20(Action):
     DS18B20_PATH = "/sys/bus/w1/devices"
-    DS18B20_DATA = "w1_slave"
+    DS18B20_DATA = "temperature" # "w1_slave"
 
     def __init__(self, id, random):
         self._id = id
@@ -1147,16 +1147,18 @@ class ActionReadSensorDs18b20(Action):
             err = None
             while True:
                 # Load kernel modules
-                LogTab.PushLogTab(self)
-                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
-                    err = "load modules error"; break
+#                LogTab.PushLogTab(self)
+#                if not ShellCmd("sudo modprobe w1-gpio && sudo modprobe w1-therm").Ok():
+#                    err = "load modules error"; break
 
                 # Read sensor data
                 value_raw = Utils.ReadFile( \
                   self.DS18B20_PATH + "/" + str(self._id) + "/" + self.DS18B20_DATA)
-                if not value_raw:
-                    err = "no value"; break
-                value = value_raw / 1000
+
+                value = Utils.StrToInt(value_raw)
+                if not value:
+                    err = "no value :: value_raw=" + str(value_raw); break
+                value = value / 1000
 
                 break # while
             if err:

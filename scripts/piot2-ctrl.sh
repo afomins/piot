@@ -2,7 +2,6 @@
 
 # Vars
 CONFIG_VERSION="1"
-APP_VERSION="v0.1.0"
 SCRIPTS_DIR="/opt/piot2"
 HOOKS_DIR="$SCRIPTS_DIR/hooks"
 HOOK_CLIENT="$HOOKS_DIR/piot2-client-hook.sh"
@@ -29,13 +28,6 @@ done
 # ------------------------------------------------------------------------------
 # PRIVATE METHODS
 # ------------------------------------------------------------------------------
-_usage () {
-    echo """
-Usage: $0 --action=xxx
-"""
-    exit 42
-}
-
 _systemd_get_unit_status() {
     local unit=$1
     local value=$2
@@ -45,10 +37,6 @@ _systemd_get_unit_status() {
 _systemd_analyze_timetamp() {
     local ts=$1
     systemd-analyze timestamp "$ts" | grep "From now" | awk -F: '{print $2}' | xargs
-}
-
-_is_installed() {
-    [[ -d "$SCRIPTS_DIR" ]]
 }
 
 _hook_create_if_missing() {
@@ -150,7 +138,7 @@ _service_disable() {
 # ------------------------------------------------------------------------------
 hook_server_start() {
     echo "Starting piot2 server"
-    /opt/piot2/piot2-start-server.sh /opt/piot2/cfg/server.cfg
+    $SCRIPTS_DIR/piot2-start-server.sh $CONFIG_DIR/server.cfg
 }
 
 config_create() {
@@ -197,15 +185,6 @@ status_show() {
     local json="{\"app\":{}, \"hooks\":{}, \"http-server\":{}, \"config\":{}, \"db\":{}}"
 
     # App
-    local tmp=`_is_installed && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.deployed.\"on-host\" = $tmp")
-
-    tmp=`podman container exists $CONTAINER_NAME_PIOT2 &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.deployed.\"in-container-piot2\" = $tmp")
-
-    tmp=`podman container exists $CONTAINER_NAME_GRAFANA &> /dev/null && echo true || echo false`
-    json=$(echo $json | jq -Mc ".app.deployed.\"in-container-grafana\" = $tmp")
-    json=$(echo $json | jq -Mc ".app.version.app = \"$APP_VERSION\"")
     json=$(echo $json | jq -Mc ".app.version.config = \"$CONFIG_VERSION\"")
 
     # Hooks
@@ -247,7 +226,7 @@ status_show() {
     json=$(echo $json | jq -Mc ".\"http-server\".state = \"$state_active:$state_sub\"")
 
     # Configs
-    _is_installed && for cfg_path in $CONFIG_DIR/*.cfg; do
+    for cfg_path in $CONFIG_DIR/*.cfg; do
         cfg_name=$(basename $cfg_path)
         cfg_name_masked="\"$cfg_name\""
         json=$(echo $json | jq -Mc ".config.$cfg_name_masked = {}")
@@ -293,6 +272,25 @@ status_show() {
     echo $json | jq
 }
 
+usage () {
+    echo """
+PIOT2 Controller:
+  Status:
+    $0 --action=status
+
+  Client:
+    $0 --action=client-enable
+    $0 --action=client-disable
+    $0 --action=config-client-create --config=br5-bsmt-temp-heater-in
+
+  Server:
+    $0 --action=server-enable
+    $0 --action=server-disable
+    $0 --action=config-server-create
+"""
+    exit 42
+}
+
 # ------------------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------------------
@@ -308,12 +306,10 @@ main() {
             _hook_create_if_missing
             source $HOOK_CLIENT
         ;;
-
         hook-server)
             _hook_create_if_missing
             source $HOOK_SERVER
         ;;
-
         hook-server-start)
             hook_server_start
         ;;
@@ -357,10 +353,13 @@ main() {
         ;;
 
         # ----------------------------------------------------------------------
-        # STATUS
-        *)
-            _is_installed && _hook_create_if_missing
+        # STUFF
+        status)
+            _hook_create_if_missing
             status_show
+        ;;
+        *)
+            usage
         ;;
     esac
 }

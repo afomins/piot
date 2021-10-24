@@ -257,13 +257,23 @@ status_show() {
     tmp=`_container_is_running $ccc; _echo_bool`
     json=$(echo $json | jq -Mc "$prefix.\"is-running\" = $tmp")
 
-    # sensors.w1-gpio1
+    # modules.w1-gpio1
     tmp=`grep -e "^w1_gpio " /proc/modules > /dev/null 2>&1; _echo_bool`
-    json=$(echo $json | jq -Mc ".sensors.\"w1-gpio\" = $tmp")
+    json=$(echo $json | jq -Mc ".modules.\"w1-gpio\" = $tmp")
 
-    # sensors.w1-therm
+    # modules.w1-therm
     tmp=`grep -e "^w1_therm " /proc/modules > /dev/null 2>&1; _echo_bool`
-    json=$(echo $json | jq -Mc ".sensors.\"w1-therm\" = $tmp")
+    json=$(echo $json | jq -Mc ".modules.\"w1-therm\" = $tmp")
+
+    # sensors
+    prefix=".sensors.ds18b20"
+    for sdir in /sys/bus/w1/devices/*/; do
+        sensor_id=`basename $sdir`
+        [ ! -f $sdir/temperature ] && continue
+
+        sensor_value=`cat $sdir/temperature`
+        json=$(echo $json | jq -Mc "$prefix.\"$sensor_id\" = $sensor_value")
+    done
 
     # Dump
     echo $json | jq
@@ -274,6 +284,10 @@ usage () {
 PIOT2 Installer: 
   Status:
     $0 --action=status
+
+  Deploy:
+    $0 --action=deploy-serverless
+    $0 --action=undeploy-serverless
 
   Sensors:
     $0 --action=sensors-enable
@@ -345,6 +359,8 @@ main() {
         ;;
         status)
             status_show
+        ;;
+        deploy-client)
         ;;
         *)
             usage
