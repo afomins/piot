@@ -7,7 +7,7 @@ Type=simple
 Restart=always
 RestartSec=5
 User=XXpiot2XX
-ExecStart=/usr/bin/piot2-ctrl --action=server-start
+ExecStart=/usr/bin/piot2-ctrl --action=hook-server-start
 
 [Install]
 WantedBy=multi-user.target

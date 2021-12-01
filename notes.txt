@@ -74,5 +74,20 @@ network={
     key_mgmt=WPA-PSK
 }
 
+config.txt
 dtoverlay=w1-gpio
 enable_uart=1
+
+
+cd /Volumes/boot
+touch ssh
+
+
+sudo vi /etc/containers/containers.conf
+[engine]
+cgroup_manager = "cgroupfs"
+
+[engine]
+cgroup_manager = "cgroupfs"
+events_logger = "file"
+

@@ -15,6 +15,6 @@ override_dh_auto_install:
 	install -p -m 0755 scripts/* $(DESTROOT)/opt/piot2/
 
 #	install -p -m 0755 hooks/* $(DESTROOT)/opt/piot2/hooks/
-#	install -p -m 0640 cfg/* $(DESTROOT)/opt/piot2/cfg/
+	install -p -m 0640 cfg/server.cfg $(DESTROOT)/opt/piot2/cfg/server.cfg
 
 	dh_link opt/piot2/piot2-ctrl.sh usr/bin/piot2-ctrl

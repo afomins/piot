@@ -4,11 +4,14 @@
 PKG_NAME="piot2"
 CONTAINER_PIOT2="piot2"
 CONTAINER_GRAFANA="piot2-grafana"
+GRAFANA_PORT=3000
+SERVER_PORT=8000
 
 # Parse arguments
 ARGS_ACTION="fuck"
 ARGS_DEB_PATH=`(ls piot2*.deb 2> /dev/null || echo piot2-not-found.deb) | head -n1`
 ARGS_CONTAINER_NAME="piot2"
+ARGS_SERVICE_USERNAME="$SUDO_USER"
 for i in "$@"; do
     case $i in
         --action=*)
@@ -23,6 +26,10 @@ for i in "$@"; do
         ARGS_CONTAINER_NAME="${i#*=}"
         shift
         ;;
+        --service-username=*)
+        ARGS_SERVICE_USERNAME="${i#*=}"
+        shift
+        ;;
         *)
         ;;
     esac
@@ -31,6 +38,13 @@ done
 # ------------------------------------------------------------------------------
 # PRIVATE METHODS
 # ------------------------------------------------------------------------------
+_check_dependencies() {
+    if ! which jq &> /dev/null 2>&1; then
+        echo "Dependency error: 'jq' was not found"
+        exit 42
+    fi
+}
+
 _echo_bool() {
     [ $? -eq 0 ] && echo true || echo false
 }
@@ -109,6 +123,8 @@ CMD ["/lib/systemd/systemd"]
     mkdir -p ./mnt
     mkdir -p ./data/cfg
     podman create \
+        -p $SERVER_PORT:$SERVER_PORT \
+        --net="host" \
         --name $name_container \
         --hostname $name_container \
         --volume /etc/localtime:/etc/localtime:ro \
@@ -132,13 +148,37 @@ _container_grafana_create() {
 
     echo "Creating container :: name=$name_container path=$PWD"
     podman run -d \
-        -p 3000:3000 \
+        -p $GRAFANA_PORT:$GRAFANA_PORT \
+        --net="host" \
         --name=$name_container \
         --hostname=$name_container \
         --volume ./data/cfg:/piot2 \
-        --net="host" \
         -e "GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,frser-sqlite-datasource" \
         $name_image
+}
+
+_container_watchdog_create() {
+    local container_name=$1
+    local user_name=$2
+    local service_name="$container_name-container.service"
+
+    # Create service file
+    echo "Creating systemd service :: service=$service_name"
+    echo """[Unit]
+Description=Watchdog for $container container
+
+[Service]
+Type=simple
+Restart=on-failure
+User=$user_name
+ExecStart=/usr/bin/podman start --attach $container_name
+ExecStop=/usr/bin/podman stop -t 2 $container_name
+
+[Install]
+WantedBy=local.target
+    """ > /etc/systemd/system/$service_name
+
+    systemctl enable $service_name
 }
 
 # ------------------------------------------------------------------------------
@@ -283,30 +323,31 @@ usage () {
     echo """
 PIOT2 Installer: 
   Status:
-    $0 --action=status
+         $0 --action=status
 
   Deploy:
-    $0 --action=deploy-serverless
-    $0 --action=undeploy-serverless
+         $0 --action=deploy-serverless
+         $0 --action=undeploy-serverless
 
   Sensors:
-    $0 --action=sensors-enable
-    $0 --action=sensors-disable
-
+         $0 --action=sensors-enable
+         $0 --action=sensors-disable
+ 
   Container piot2:
-    $0 --action=create
-    $0 --action=start
-    $0 --action=stop
-    $0 --action=delete
-    $0 --action=install-deb --deb-path=~/git/piot2_0.1.0_all.deb
-    $0 --action=shell
+         $0 --action=create
+    sudo $0 --action=create-watchdog --username=$SUDO_USER
+         $0 --action=start
+         $0 --action=stop
+         $0 --action=delete
+         $0 --action=install-deb --deb-path=~/git/piot2_0.1.0_all.deb
+         $0 --action=shell
 
   Container piot2-grafana:
-    $0 --action=create --container=piot2-grafana 
-    $0 --action=start --container=piot2-grafana
-    $0 --action=stop --container=piot2-grafana
-    $0 --action=delete --container=piot2-grafana
-    $0 --action=shell --container=piot2-grafana
+         $0 --action=create --container=piot2-grafana 
+         $0 --action=start --container=piot2-grafana
+         $0 --action=stop --container=piot2-grafana
+         $0 --action=delete --container=piot2-grafana
+         $0 --action=shell --container=piot2-grafana
 """
     exit 42
 }
@@ -320,6 +361,9 @@ main() {
     local deb_path=$ARGS_DEB_PATH
     local list_running_containers=true
 
+    # Sanity check
+    _check_dependencies
+
     # Run action
     case $action in
         shell)
@@ -332,6 +376,11 @@ main() {
             [ "$container" == "$CONTAINER_PIOT2" ] && \
                 _container_piot2_create || \
                 _container_grafana_create
+        ;;
+        create-watchdog)
+            local username=$ARGS_SERVICE_USERNAME
+            _container_test
+            _container_watchdog_create $container $username
         ;;
         start)
             _container_test
