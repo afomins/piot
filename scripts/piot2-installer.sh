@@ -91,7 +91,7 @@ ENV DEBIAN_FRONTEND noninteractive
 RUN sed -i "s/# deb/deb/g" /etc/apt/sources.list
 
 RUN apt-get update \
-    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 nano \
+    && apt-get install -y systemd systemd-sysv python3 jq sqlite3 nano curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

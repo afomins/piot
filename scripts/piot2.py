@@ -1172,6 +1172,47 @@ class ActionReadSensorDs18b20(Action):
         self.SetOut(data)
 
 #---------------------------------------------------------------------------------------------------
+class ActionReadSensorWttrinTemp(Action):
+    WTTRIN_URL = "https://wttr.in"
+    WTTRIN_CACHE = "/tmp/wttrin.json"
+
+    def __init__(self, id):
+        self._id = id
+        super(ActionReadSensorWttrinTemp, self).__init__("sensor-wttrin-temp",
+          OrderedDict({"sensor-id":id}))
+
+    def Run(self):
+        value = None
+        err = None
+        while True:
+            LogTab.PushLogTab(self)
+            # Read wttr.in --->  https://wttr.in/Riga?format=j1
+            url = self.WTTRIN_URL + "/" + self._id + "?format=j1"
+            if not ShellCmd("curl " + url + " -o " + self.WTTRIN_CACHE).Ok():
+                err = "curl fetch error"; break
+
+            cmd = ShellCmd("cat " + self.WTTRIN_CACHE + " | jq '.current_condition[0].temp_C | tonumber'")
+            if not cmd.Ok():
+                err = "json parse error"; break
+
+            # Read sensor data
+            value_raw = cmd.OutStr()
+            value = Utils.StrToInt(value_raw)
+            if not value:
+                err = "no value :: value=" + str(value_raw); break
+
+            break # while
+        if err:
+            self.SetErr("Failed to read sensor wttr.in :: " + err)
+
+        # Save sensor data
+        data = OrderedDict()
+        if value != None:
+            data["time"] = Utils.GetUnixTimestamp()
+            data["value"] = value
+        self.SetOut(data)
+
+#---------------------------------------------------------------------------------------------------
 class ActionHttpServer(Action):
     ALLOWED_ACTIONS = ["backlog-write"]
     OVERRIDE_ARGS = None
@@ -1502,6 +1543,11 @@ def RunActionOne(name, args):
         action = ActionReadSensorDs18b20(
             args.get("sensor-id"),
             args.get("random"))
+
+    # read-sensor-wttrin
+    elif name == "read-sensor-wttrin":
+        action = ActionReadSensorWttrinTemp(
+            args.get("sensor-id"))
     return action
 
 #---------------------------------------------------------------------------------------------------

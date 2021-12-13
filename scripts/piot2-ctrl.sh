@@ -75,13 +75,13 @@ _hook_client_apply() {
         #  * Saves sensor data to local backlog
         #  * Tries sending local backlog to remote server
         echo "Applying client hooks for server deployment:"
-        _hook_write "$config_name" "piot2-write-sensor-to-backlog.sh" "$HOOK_CLIENT"
+        _hook_write "$config_name" "piot2-write-sensor-ds18b20-to-backlog.sh" "$HOOK_CLIENT"
         _hook_write "$config_name" "piot2-send-backlog-to-server.sh" "$HOOK_CLIENT"
     else
         # In serverless deployment client writes sensor data directly fo DB
         echo "Applying client hooks for serverless deployment:"
         _hook_write "$config_name" "piot2-create-sensor-in-db.sh" "$HOOK_CLIENT"
-        _hook_write "$config_name" "piot2-write-sensor-to-db.sh" "$HOOK_CLIENT"
+        _hook_write "$config_name" "piot2-write-sensor-ds18b20-to-db.sh" "$HOOK_CLIENT"
     fi
 }
 
